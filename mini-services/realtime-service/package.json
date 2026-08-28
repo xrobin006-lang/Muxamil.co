@@ -1,0 +1,17 @@
+{
+  "name": "muxamil-realtime-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional socket.io realtime companion service for Muxamil.co (live notifications, chat, presence)",
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.10",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12"
+  }
+}
