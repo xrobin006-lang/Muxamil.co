@@ -234,18 +234,13 @@ export async function POST(req: NextRequest) {
     await emitRealtime({ event: 'message:new', room: 'admin', payload: { ...dto, forAdmins: true } })
     if (user.role === 'admin') {
       await emitRealtime({ event: 'message:new', room: `user:${conversation.user_id}`, payload: dto })
+      // ADMIN_REPLY (spec §33): entity_id = the conversation so tapping the
+      // notification (in-app or push) opens the exact conversation.
       await notifyUser({
         userId: conversation.user_id,
-        type: 'message',
-        message:
-          dto.messageType === 'audio'
-            ? 'You received a voice message.'
-            : dto.messageType === 'image'
-              ? 'You received a photo.'
-              : dto.messageType === 'file'
-                ? 'You received a file.'
-                : 'You received a new message.',
-        relatedId: dto.id,
+        type: 'admin_reply',
+        message: `New message from ${user.fullName || 'Muxamil Admin'}`,
+        relatedId: conversation.id,
         actorId: user.id,
       })
     } else {
@@ -253,7 +248,7 @@ export async function POST(req: NextRequest) {
       await notifyAdmins({
         type: 'message',
         message: `${user.fullName} sent you a new message`,
-        relatedId: dto.id,
+        relatedId: conversation.id,
         actorId: user.id,
       })
     }

@@ -1,0 +1,46 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/lib/types.ts",
+    "src/lib/post-dto.ts",
+    "src/lib/push.ts",
+    "src/lib/realtime.ts",
+    "src/lib/ai-automation.ts",
+    "src/lib/supabase.ts",
+    "src/lib/auth.ts",
+    "src/lib/admin-auth.ts",
+    "src/lib/ai.ts",
+    "src/lib/api-helpers.ts",
+    "src/app/api/**/*.ts",
+    "src/hooks/use-service-worker.ts",
+    "src/components/app/app-shell.tsx",
+    "src/components/app/components/post-card.tsx",
+    "src/components/app/views/feed-view.tsx",
+    "src/lib/format.ts",
+    "src/components/app/views/notifications-view.tsx",
+    "src/components/app/views/admin-users.tsx",
+    "src/components/app/views/user-profile-view.tsx",
+    "src/stores/app-store.ts",
+    "src/lib/compat-store.ts",
+    "src/lib/api-client.ts",
+    "src/components/app/commhub-app.tsx",
+    "src/components/app/auth-view.tsx",
+    "src/hooks/use-realtime.ts",
+    "src/components/app/views/settings-view.tsx",
+    "src/components/app/views/admin/admin-settings.tsx",
+    "src/components/app/components/ai-activity-section.tsx",
+    "src/components/app/views/profile-view.tsx",
+    "src/components/app/views/admin/admin-posts.tsx",
+    "src/components/app/views/admin/admin-analytics.tsx",
+    "scripts/watchdog.ts",
+    "src/components/app/views/admin/admin-dashboard.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next",
+    "skills"
+  ]
+}

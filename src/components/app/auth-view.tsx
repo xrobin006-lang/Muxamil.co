@@ -2,27 +2,16 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { ArrowLeft, Eye, EyeOff, Loader2, MailCheck, MailX, KeyRound } from 'lucide-react'
+import { ArrowLeft, Eye, EyeOff, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { BrandWordmark } from '@/components/app/brand-logo'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { apiGet, apiJson } from '@/lib/api-client'
+import { apiGet, apiJson, setSessionToken } from '@/lib/api-client'
 import { useAppStore, defaultViewFor } from '@/stores/app-store'
 import type { PublicSettings, SessionUser } from '@/lib/types'
-import { cn } from '@/lib/utils'
 
-type AuthResponse = { user: SessionUser }
+type AuthResponse = { user: SessionUser; sessionToken?: string }
 type SettingsResponse = { settings: PublicSettings }
-type ResetResponse = { sent: boolean; status: 'sent' | 'rate-limited' | 'error' }
 
 export default function AuthView({
   initialMode = 'login',
@@ -43,12 +32,6 @@ export default function AuthView({
   // Public branding (platform name, tagline, logo) + the registration gate.
   const [branding, setBranding] = useState<PublicSettings | null>(null)
 
-  // "Forgot password?" dialog state.
-  const [resetOpen, setResetOpen] = useState(false)
-  const [resetEmail, setResetEmail] = useState('')
-  const [resetBusy, setResetBusy] = useState(false)
-  const [resetSent, setResetSent] = useState<null | 'sent' | 'rate-limited' | 'error'>(null)
-
   useEffect(() => {
     apiGet<SettingsResponse>('/api/settings')
       .then((data) => {
@@ -68,25 +51,6 @@ export default function AuthView({
   const setUnreadNotifications = useAppStore((s) => s.setUnreadNotifications)
   const navigate = useAppStore((s) => s.navigate)
 
-  const submitReset = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (resetBusy) return
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resetEmail.trim())) {
-      toast.error('Please enter a valid email address.')
-      return
-    }
-    setResetBusy(true)
-    try {
-      const data = await apiJson<ResetResponse>('/api/auth/reset-password', 'POST', {
-        email: resetEmail.trim(),
-      })
-      setResetSent(data.status)
-    } catch {
-      setResetSent('sent') // never leak whether the address exists
-    } finally {
-      setResetBusy(false)
-    }
-  }
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
@@ -95,6 +59,10 @@ export default function AuthView({
       const payload =
         mode === 'login' ? { email, password } : { email, password, fullName, username }
       const data = await apiJson<AuthResponse>(`/api/auth/${mode}`, 'POST', payload)
+      // Store the echoed session token FIRST so the Bearer fallback is
+      // active for the immediate badge-hydration call below when the browser
+      // blocked the session cookie (cross-site preview iframe).
+      if (data.sessionToken) setSessionToken(data.sessionToken)
       setUser(data.user)
       // Hydrate the real unread badges (and maintenance flag) right away —
       // the mount-time /api/auth/me fetch ran before the session existed.
@@ -145,9 +113,34 @@ export default function AuthView({
         ) : null}
 
         <div className="animate-in fade-in slide-in-from-bottom-3 duration-500 rounded-2xl border bg-card p-8 shadow-xl">
-          {/* Brand — official lockup (icon + wordmark + tagline), centered */}
+          {/* Brand */}
           <div className="flex flex-col items-center text-center">
-            <BrandWordmark platformName={platformName} className="h-14 sm:h-16" />
+            {branding?.logo_url ? (
+              <img
+                src={branding.logo_url}
+                alt={`${platformName} logo`}
+                className="h-12 w-12 rounded-xl object-cover shadow-lg"
+              />
+            ) : (
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-lg">
+                <svg
+                  viewBox="0 0 24 24"
+                  className="h-6 w-6"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+                </svg>
+              </div>
+            )}
+            <h1 className="mt-4 text-xl font-bold tracking-tight" dir="auto">
+              {platformName}
+            </h1>
+            <p className="mt-0.5 text-xs text-muted-foreground">Your community home</p>
           </div>
 
           <h2 className="mt-8 text-2xl font-bold tracking-tight">
@@ -204,22 +197,7 @@ export default function AuthView({
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password">Password</Label>
-                {mode === 'login' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResetOpen(true)
-                      setResetSent(null)
-                      setResetEmail(email)
-                    }}
-                    className="rounded text-xs font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    Forgot password?
-                  </button>
-                )}
-              </div>
+              <Label htmlFor="password">Password</Label>
               <div className="relative">
                 <Input
                   id="password"
@@ -271,101 +249,19 @@ export default function AuthView({
               </button>
             </p>
           )}
+
+          {mode === 'login' ? null : (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              By creating an account you agree to keep content respectful. All posts are
+              moderated by the {platformName} team.
+            </p>
+          )}
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
           © {new Date().getFullYear()} {platformName} — A safe, moderated community platform.
         </p>
       </div>
-
-      {/* Forgot-password dialog */}
-      <Dialog
-        open={resetOpen}
-        onOpenChange={(open) => {
-          if (!resetBusy) setResetOpen(open)
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <KeyRound className="h-4 w-4 text-primary" aria-hidden="true" /> Reset your password
-            </DialogTitle>
-            <DialogDescription>
-              Enter the email address linked to your account and we&apos;ll send you a reset
-              link.
-            </DialogDescription>
-          </DialogHeader>
-          {resetSent === null ? (
-            <form onSubmit={submitReset} className="space-y-4" noValidate>
-              <div className="space-y-2">
-                <Label htmlFor="reset-email">Email</Label>
-                <Input
-                  id="reset-email"
-                  type="email"
-                  value={resetEmail}
-                  onChange={(e) => setResetEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  autoComplete="email"
-                  required
-                  autoFocus
-                />
-              </div>
-              <DialogFooter>
-                <Button type="submit" className="w-full" disabled={resetBusy}>
-                  {resetBusy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Send reset link
-                </Button>
-              </DialogFooter>
-            </form>
-          ) : (
-            <div className="space-y-4">
-              <div
-                className={cn(
-                  'flex items-start gap-3 rounded-xl border p-4',
-                  resetSent === 'sent'
-                    ? 'border-emerald-500/30 bg-emerald-500/[0.06]'
-                    : resetSent === 'rate-limited'
-                      ? 'border-amber-500/40 bg-amber-500/[0.07]'
-                      : 'border-destructive/30 bg-destructive/[0.05]',
-                )}
-              >
-                {resetSent === 'sent' ? (
-                  <MailCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
-                ) : (
-                  <MailX className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-                )}
-                <div className="text-sm">
-                  {resetSent === 'sent' ? (
-                    <p dir="auto">
-                      If an account exists for{' '}
-                      <span className="font-medium">{resetEmail.trim()}</span>, a password reset
-                      link is on its way. Please check your inbox (and spam folder).
-                    </p>
-                  ) : resetSent === 'rate-limited' ? (
-                    <p dir="auto">
-                      Too many reset requests for this email — please wait a little while and try
-                      again.
-                    </p>
-                  ) : (
-                    <p dir="auto">
-                      We couldn&apos;t send reset emails right now. Please contact support at{' '}
-                      <span className="font-medium">
-                        {branding?.support_email || 'muxamil.co@gmail.com'}
-                      </span>{' '}
-                      and we&apos;ll reset your password for you.
-                    </p>
-                  )}
-                </div>
-              </div>
-              <DialogFooter>
-                <Button className="w-full" onClick={() => setResetOpen(false)}>
-                  Close
-                </Button>
-              </DialogFooter>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

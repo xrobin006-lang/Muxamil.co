@@ -2,39 +2,41 @@
  * CommHub realtime service
  * ------------------------
  * Two listeners:
- *  - SOCKET_PORT   socket.io server (default :3003, path "/")
- *  - CONTROL_PORT  internal HTTP control API (POST /broadcast, default :3004,
- *                  bound to 127.0.0.1) used by the Next.js APIs
+ *  - :3003  socket.io server (path MUST stay "/" for the Caddy gateway)
+ *  - :3004  internal HTTP control API (POST /broadcast) used by Next.js APIs
  *
- * All configuration comes from environment variables (.env in this folder —
- * see .env.example). The service refuses to start when required variables
- * are missing. Clients authenticate via the CommHub httpOnly session cookie
- * sent with the handshake. The user's role/status is then read server-side
- * from Supabase (mux_profiles, via PostgREST) so room membership (user:{id},
- * admin) can never be spoofed by the client. Lookups are cached in memory for
- * 60s; if Supabase is unreachable we fall back to a stale cached entry and
- * DENY the socket when no cache exists (fail-closed).
+ * Clients authenticate via the CommHub httpOnly session cookie sent with the
+ * same-origin handshake. The user's role/status is then read server-side from
+ * Supabase (mux_profiles, via PostgREST) so room membership (user:{id}, admin)
+ * can never be spoofed by the client. Lookups are cached in memory for 60s;
+ * if Supabase is unreachable we fall back to a stale cached entry and DENY
+ * the socket when no cache exists (fail-closed).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server, type Socket } from 'socket.io'
 import { jwtVerify } from 'jose'
+import { createHash } from 'crypto'
 
-const SOCKET_PORT = Number(process.env.SOCKET_PORT || 3003)
-const CONTROL_PORT = Number(process.env.CONTROL_PORT || 3004)
-const INTERNAL_KEY = process.env.INTERNAL_API_KEY || ''
-const SESSION_SECRET = process.env.SESSION_SECRET || ''
-const SUPABASE_URL =
-  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || ''
+const SOCKET_PORT = 3003
+const CONTROL_PORT = 3004
+// Credentials come exclusively from this service's .env (bun auto-loads it).
+// Keep the values in sync with the Next.js app's root .env.
+function env(name: string, fallback = ''): string {
+  const v = process.env[name]
+  return v && v.length > 0 ? v : fallback
+}
+const INTERNAL_KEY = env('INTERNAL_API_KEY')
+const SESSION_SECRET = env('SESSION_SECRET')
 
+const SUPABASE_URL = env('SUPABASE_URL') || env('NEXT_PUBLIC_SUPABASE_URL')
+const SUPABASE_SECRET_KEY = env('SUPABASE_SECRET_KEY')
 if (!INTERNAL_KEY || !SESSION_SECRET || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error(
-    '[realtime] FATAL: required environment variables are missing. ' +
-      'Copy .env.example to .env in this folder and fill it in ' +
-      '(SUPABASE_URL, SUPABASE_SECRET_KEY, SESSION_SECRET, INTERNAL_API_KEY).'
+    '[realtime] Missing required env (INTERNAL_API_KEY / SESSION_SECRET / SUPABASE_URL / SUPABASE_SECRET_KEY). Create mini-services/realtime-service/.env — see .env.example in the repo root.'
   )
-  process.exit(1)
 }
+
+// Supabase REST (PostgREST) — credentials resolved above from this service's .env.
 
 interface ProfileRow {
   id: string
@@ -101,14 +103,12 @@ async function verifyToken(token: string): Promise<string | null> {
   }
 }
 
-// --- Socket.io (public — reverse-proxied from your web server) --------------
+// --- Socket.io (public, via Caddy gateway) ---------------------------------
 const httpServer = createServer()
 
 const io = new Server(httpServer, {
-  // Path "/" by default: a reverse proxy can forward ALL traffic for a
-  // hostname/subdomain to this service. Override with SOCKET_PATH if you
-  // mount the service at a specific path (e.g. "/socket.io").
-  path: process.env.SOCKET_PATH || '/',
+  // DO NOT change the path — Caddy relies on it for forwarding.
+  path: '/',
   cors: { origin: '*', methods: ['GET', 'POST'], credentials: true },
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -116,9 +116,18 @@ const io = new Server(httpServer, {
 
 io.use(async (socket, next) => {
   try {
+    // Session transport: httpOnly cookie first, then the Bearer fallback
+    // (`auth.token`) for iframe preview contexts where the browser blocks
+    // the cookie. Both are the SAME signed JWT, verified identically —
+    // authorization (role/status from the profile lookup) is unchanged.
     const cookie = parseCookie(socket.handshake.headers.cookie, 'commhub_session')
-    if (!cookie) return next(new Error('unauthorized'))
-    const uid = await verifyToken(cookie)
+    const bearer =
+      typeof (socket.handshake.auth as { token?: unknown } | undefined)?.token === 'string'
+        ? ((socket.handshake.auth as { token: string }).token)
+        : null
+    const rawToken = cookie ?? bearer
+    if (!rawToken) return next(new Error('unauthorized'))
+    const uid = await verifyToken(rawToken)
     if (!uid) return next(new Error('unauthorized'))
     const profile = await getProfile(uid)
     if (!profile) return next(new Error('unauthorized'))
@@ -199,31 +208,8 @@ io.on('connection', (socket: Socket) => {
   })
 })
 
-// Bind failures are FATAL: if another instance already owns :3003, this
-// process would serve only the control API with zero sockets (split-brain:
-// broadcasts emitted into the void). Die loudly instead.
-httpServer.on('error', (err: NodeJS.ErrnoException) => {
-  console.error(`[realtime] FATAL: cannot bind :${SOCKET_PORT} (${err.code ?? err.message}) — another instance may already be running. Exiting.`)
-  process.exit(1)
-})
-
-// Sequential binding: :3003 first, :3004 only once :3003 is ours. A losing
-// instance therefore exits on the FIRST bind failure before ever touching the
-// control port, so exactly one process can ever own both listeners (a crossed
-// bind — one instance per port — is impossible).
-httpServer.listen(SOCKET_PORT, (err?: Error | null) => {
-  if (err) {
-    console.error(`[realtime] FATAL: cannot bind :${SOCKET_PORT} — ${err.message}. Exiting.`)
-    process.exit(1)
-  }
+httpServer.listen(SOCKET_PORT, () => {
   console.log(`[realtime] socket.io listening on :${SOCKET_PORT}`)
-  controlServer.listen(CONTROL_PORT, '127.0.0.1', (controlErr?: Error | null) => {
-    if (controlErr) {
-      console.error(`[realtime] FATAL: cannot bind 127.0.0.1:${CONTROL_PORT} — ${controlErr.message}. Exiting.`)
-      process.exit(1)
-    }
-    console.log(`[realtime] control API listening on 127.0.0.1:${CONTROL_PORT}`)
-  })
 })
 
 // --- Internal control API (localhost only) ----------------------------------
@@ -267,9 +253,144 @@ const controlServer = createServer((req: IncomingMessage, res: ServerResponse) =
   })
 })
 
-// Same rule for the control API: half-serving (sockets without control API)
-// is equally broken — Next.js emits would fail. Exit if :3004 is taken.
-controlServer.on('error', (err: NodeJS.ErrnoException) => {
-  console.error(`[realtime] FATAL: cannot bind 127.0.0.1:${CONTROL_PORT} (${err.code ?? err.message}) — another instance may already be running. Exiting.`)
-  process.exit(1)
+controlServer.listen(CONTROL_PORT, '127.0.0.1', () => {
+  console.log(`[realtime] control API listening on 127.0.0.1:${CONTROL_PORT}`)
 })
+
+// ---------------------------------------------------------------------------
+// Scheduled-post publisher (server-side scheduler — spec §75)
+// Runs inside this always-on service so publication does NOT depend on any
+// browser tab. Every 60s it flips due scheduled posts (status='scheduled' AND
+// published_at <= now AND is_published=false) to published, then broadcasts
+// 'feed:new-post' for each so connected clients prepend them live.
+// Production note (documented in README): on Vercel, mirror this with a cron
+// (e.g. vercel.json crons hitting an admin-authorized publish-due endpoint) —
+// this loop keeps working wherever this service runs.
+// ---------------------------------------------------------------------------
+const SCHEDULER_INTERVAL = 60_000
+
+// REST helpers (service key — bypasses RLS, same authority as the Next.js API).
+async function supa(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...init,
+    headers: {
+      apikey: SUPABASE_SECRET_KEY,
+      Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+    signal: AbortSignal.timeout(8000),
+  })
+}
+
+/** RFC 4122 v5 UUID — deterministic ids make fan-out retries idempotent. */
+const FANOUT_NS = '5f4a3c1e-8c62-4c0f-9e2a-01b6d3f7a9e4'
+function uuidV5(name: string): string {
+  const ns = Buffer.from(
+    FANOUT_NS.match(/[0-9a-f]{2}/g)!.map((h) => parseInt(h, 16))
+  )
+  const hash = createHash('sha1')
+  hash.update(ns)
+  hash.update(Buffer.from(name, 'utf8'))
+  const b = hash.digest()
+  b[6] = (b[6] & 0x0f) | 0x50
+  b[8] = (b[8] & 0x3f) | 0x80
+  const hex = b.subarray(0, 16).toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
+ * NEW_POST notification fan-out (spec §33) for a just-published post:
+ * one mux_notifications row per active member (excluding the author),
+ * idempotent via uuidv5 ids; members who opted out (new_posts=false) are
+ * skipped. Failures never block the publication itself.
+ */
+async function fanOutNewPost(post: { id: string; title: string | null; slug: string | null; author_id: string | null }) {
+  try {
+    const [usersRes, prefsRes] = await Promise.all([
+      supa('mux_profiles?select=id&status=eq.active&limit=1000'),
+      supa('mux_notification_prefs?select=user_id&new_posts=eq.false&limit=1000'),
+    ])
+    if (!usersRes.ok) throw new Error(`users ${usersRes.status}`)
+    const users = (await usersRes.json()) as { id: string }[]
+    const optedOut = prefsRes.ok
+      ? new Set(((await prefsRes.json()) as { user_id: string }[]).map((r) => r.user_id))
+      : new Set<string>()
+
+    const rows = users
+      .filter((u) => u.id !== post.author_id && !optedOut.has(u.id))
+      .map((u) => ({
+        id: uuidV5(`new_post:${post.id}:${u.id}`),
+        user_id: u.id,
+        actor_id: post.author_id,
+        type: 'new_post',
+        entity_id: post.id,
+        entity_slug: post.slug,
+        message: `New post: ${post.title ?? 'Untitled'}`,
+        is_read: false,
+        created_at: new Date().toISOString(),
+      }))
+    if (rows.length === 0) return
+    const res = await supa('mux_notifications', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=ignore-duplicates' },
+      body: JSON.stringify(rows),
+    })
+    if (!res.ok) throw new Error(`insert ${res.status}`)
+    // Bell refresh for connected tabs (push is dispatched by the Next.js
+    // API when admins publish; scheduled publishes at least refresh in-app).
+    io.emit('notification:new', { type: 'new_post', postId: post.id })
+    console.log(`[scheduler] notified ${rows.length} members about post ${post.id}`)
+  } catch (err) {
+    console.warn('[scheduler] new-post fan-out failed:', (err as Error).message)
+  }
+}
+
+async function publishDueScheduledPosts() {
+  try {
+    const now = new Date().toISOString()
+    // Read due posts first (id + title so the broadcast is meaningful).
+    const res = await supa(
+      `mux_posts?select=id,title,slug,author_id&status=eq.scheduled&is_published=eq.false&published_at=lte.${encodeURIComponent(now)}&limit=20`
+    )
+    if (!res.ok) throw new Error(`scheduler read ${res.status}`)
+    const due = (await res.json()) as { id: string; title: string | null; slug: string | null; author_id: string | null }[]
+    if (due.length === 0) return
+
+    for (const post of due) {
+      const patch = await supa(`mux_posts?id=eq.${encodeURIComponent(post.id)}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify({ is_published: true, status: 'published', updated_at: now }),
+      })
+      if (!patch.ok) {
+        console.warn(`[scheduler] publish failed for ${post.id}: ${patch.status}`)
+        continue
+      }
+      // Notify connected clients. The payload is intentionally minimal —
+      // clients refetch/feed merge by id via 'feed:scheduled-published'.
+      io.emit('feed:scheduled-published', { id: post.id, title: post.title ?? '' })
+      console.log(`[scheduler] published scheduled post ${post.id}`)
+      // Persist NEW_POST notifications (spec §33) — DB is the source of truth.
+      await fanOutNewPost(post)
+      // AI auto-engagement (spec §37): hand off to the Next.js API (it owns
+      // the provider chain + AI account). Internal-key authenticated; the
+      // route dedups so retries are harmless. Fire-and-forget.
+      if (INTERNAL_KEY) {
+        fetch('http://localhost:3000/api/admin/ai/auto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Internal-Key': INTERNAL_KEY },
+          body: JSON.stringify({ postId: post.id }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {})
+      }
+    }
+  } catch (err) {
+    console.warn('[scheduler] cycle skipped:', (err as Error).message)
+  }
+}
+
+setInterval(publishDueScheduledPosts, SCHEDULER_INTERVAL)
+// Also run once shortly after boot (catches posts that came due while down).
+setTimeout(publishDueScheduledPosts, 5_000)
+console.log('[scheduler] scheduled-post publisher active (60s interval)')

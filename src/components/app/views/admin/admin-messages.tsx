@@ -242,7 +242,7 @@ export default function AdminMessages({ initialConversationId }: { initialConver
                   style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
                 >
                   <div className="relative shrink-0">
-                    <UserAvatar name={c.userFullName || 'Member'} url={c.userAvatar} size="md" />
+                    <UserAvatar name={c.userFullName} url={c.userAvatar} size="md" />
                     {isOnline && (
                       <span
                         className="presence-dot absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-card bg-emerald-500"
@@ -255,7 +255,7 @@ export default function AdminMessages({ initialConversationId }: { initialConver
                     <div className="flex items-center justify-between gap-2">
                       <p className="flex min-w-0 items-center gap-1">
                         <span className="truncate text-sm font-semibold" dir="auto">
-                          {c.userFullName || 'Member'}
+                          {c.userFullName}
                         </span>
                         {c.isUserVerified && <VerifiedBadge size={13} />}
                         {c.isUserBlocked && (
@@ -263,9 +263,7 @@ export default function AdminMessages({ initialConversationId }: { initialConver
                             <Ban className="h-3.5 w-3.5 text-destructive" aria-hidden="true" />
                           </span>
                         )}
-                        {c.username ? (
-                          <span className="truncate text-xs font-normal text-muted-foreground">@{c.username}</span>
-                        ) : null}
+                        <span className="truncate text-xs font-normal text-muted-foreground">@{c.username}</span>
                       </p>
                       <span className="shrink-0 text-[11px] text-muted-foreground">{timeAgo(c.lastMessageAt)}</span>
                     </div>
@@ -308,13 +306,11 @@ export default function AdminMessages({ initialConversationId }: { initialConver
             conversationId={selectedId}
             peerId={selectedConvo?.userId}
             recipient={{
-              name: selectedConvo?.userFullName || 'Member',
+              name: selectedConvo?.userFullName ?? 'Member',
               avatarUrl: selectedConvo?.userAvatar ?? null,
               isVerified: selectedConvo?.isUserVerified ?? false,
               subtitle: selectedConvo
-                ? [selectedConvo.username ? `@${selectedConvo.username}` : '', selectedConvo.isUserBlocked ? 'Blocked' : '']
-                    .filter(Boolean)
-                    .join(' · ')
+                ? `@${selectedConvo.username}${selectedConvo.isUserBlocked ? ' · Blocked' : ''}`
                 : 'Loading…',
             }}
             onBack={() => setSelectedId(null)}

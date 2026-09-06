@@ -9,7 +9,7 @@ import { ApiError, apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
-import { formatFullDate } from '@/lib/format'
+import { formatCount, formatFullDate } from '@/lib/format'
 import type { CommunityDTO, CommunityPostDTO } from '@/lib/types'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
@@ -256,10 +256,10 @@ export default function CommunityView({ communityId }: { communityId: string }) 
                 type="button"
                 onClick={() => navigate({ name: 'user', userId: community.owner.id })}
                 className="group flex items-center gap-2 rounded-full border bg-muted/40 py-1 pl-1 pr-3 transition-all hover:border-primary/40 hover:bg-accent hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={`View ${community.owner.fullName || 'Member'}'s profile`}
+                aria-label={`View ${community.owner.fullName}'s profile`}
               >
                 <span className="relative">
-                  <UserAvatar name={community.owner.fullName || 'Member'} url={community.owner.avatarUrl} size="xs" />
+                  <UserAvatar name={community.owner.fullName} url={community.owner.avatarUrl} size="xs" />
                   {ownerOnline && (
                     <span
                       className="presence-dot absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card bg-emerald-500"
@@ -268,7 +268,7 @@ export default function CommunityView({ communityId }: { communityId: string }) 
                   )}
                 </span>
                 <span className="max-w-[10rem] truncate text-sm font-medium group-hover:underline sm:max-w-none" dir="auto">
-                  {community.owner.fullName || 'Member'}
+                  {community.owner.fullName}
                 </span>
                 {community.owner.isVerified && <VerifiedBadge size={14} />}
                 <span className="text-xs text-muted-foreground">Owner</span>
@@ -279,7 +279,7 @@ export default function CommunityView({ communityId }: { communityId: string }) 
               </p>
               <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Users className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                {community.membersCount.toLocaleString()} member{community.membersCount === 1 ? '' : 's'}
+                {formatCount(community.membersCount)} member{community.membersCount === 1 ? '' : 's'}
               </p>
               {ownerOnline && (
                 <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">

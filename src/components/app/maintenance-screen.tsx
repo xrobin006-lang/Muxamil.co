@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react'
 import { Wrench } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { BrandLogo } from '@/components/app/brand-logo'
 import { apiGet } from '@/lib/api-client'
 import type { PublicSettings } from '@/lib/types'
 
@@ -39,14 +38,28 @@ export default function MaintenanceScreen({ onLogout }: { onLogout: () => void }
       <div className="relative w-full max-w-md rounded-2xl border bg-card p-8 text-center shadow-xl">
         {/* Brand mark */}
         <div className="flex items-center justify-center gap-2">
-          <BrandLogo
-            logoUrl={branding?.logo_url}
-            platformName={platformName}
-            className="h-7 w-7"
-            imgClassName="rounded-lg object-cover"
-            fallbackClassName="rounded-lg"
-            iconClassName="h-4 w-4"
-          />
+          {branding?.logo_url ? (
+            <img
+              src={branding.logo_url}
+              alt={`${platformName} logo`}
+              className="h-7 w-7 rounded-lg object-cover"
+            />
+          ) : (
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+              </svg>
+            </div>
+          )}
           <p className="text-sm font-semibold tracking-tight" dir="auto">
             {platformName}
           </p>

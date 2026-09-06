@@ -31,7 +31,11 @@ export async function POST(req: NextRequest) {
       .eq('id', profile.id)
       .then(() => undefined, () => undefined)
 
-    await setSessionCookie(profile.id)
-    return ok({ user: toAppUser(profile) satisfies SessionUser })
+    // The token is echoed so the client can use the Authorization: Bearer
+    // fallback in contexts where the browser blocks the session cookie
+    // (cross-site preview iframe). It is the SAME signed JWT as the cookie —
+    // server-side verification is identical for both transports.
+    const sessionToken = await setSessionCookie(profile.id)
+    return ok({ user: toAppUser(profile) satisfies SessionUser, sessionToken })
   })
 }

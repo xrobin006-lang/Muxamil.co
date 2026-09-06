@@ -1,3 +1,4 @@
+import { NextRequest } from 'next/server'
 import { supabase } from '@/lib/supabase'
 import { ok, guard, errors } from '@/lib/api-helpers'
 import { requireAdmin } from '@/lib/auth'
@@ -31,24 +32,43 @@ function metaOut(value: unknown): Record<string, unknown> | null {
   return null
 }
 
+/** Make a free-text query safe for PostgREST .or(ilike...) syntax. */
+function sanitizeSearch(q: string): string {
+  return q.replace(/[,()%]/g, ' ').trim().slice(0, 80)
+}
+
 /**
- * Audit trail for sensitive admin actions. Note: the actor FK points to the
- * shared `profiles` table (not mux_profiles), so actor names may be null for
- * accounts that never touched the sibling app.
+ * Audit trail for sensitive admin actions, with ?q search on action/target
+ * and page pagination. Note: the actor FK points to the shared `profiles`
+ * table (not mux_profiles), so actor names may be null for accounts that
+ * never touched the sibling app.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
     if (!admin) return errors.forbidden()
 
-    const { data, error } = await supabase
+    const page = Math.max(1, parseInt(req.nextUrl.searchParams.get('page') || '1', 10) || 1)
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(req.nextUrl.searchParams.get('limit') || '50', 10) || 50)
+    )
+    const q = sanitizeSearch(req.nextUrl.searchParams.get('q') || '')
+
+    let query: any = supabase
       .from('audit_logs')
       .select(
         'id,actor_id,action,target,meta,created_at,' +
-          'actor:profiles!audit_logs_actor_id_fkey(full_name,username)'
+          'actor:profiles!audit_logs_actor_id_fkey(full_name,username)',
+        { count: 'exact' }
       )
       .order('created_at', { ascending: false })
-      .limit(60)
+      .range((page - 1) * limit, (page - 1) * limit + limit - 1)
+    if (q) {
+      query = query.or(`action.ilike.%${q}%,target.ilike.%${q}%`)
+    }
+
+    const { data, count, error } = await query
     if (error) throw new Error(error.message)
 
     const rows = (data as unknown as AuditRow[]) ?? []
@@ -88,6 +108,7 @@ export async function GET() {
       createdAt: l.created_at,
     }))
 
-    return ok({ logs })
+    const total = count ?? 0
+    return ok({ logs, total, page, pages: Math.max(1, Math.ceil(total / limit)) })
   })
 }

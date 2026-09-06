@@ -1,9 +1,10 @@
 import { SignJWT, jwtVerify } from 'jose'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import { createClient } from '@supabase/supabase-js'
 import {
   supabase,
   SUPABASE_URL_RESOLVED,
+  requireEnv,
   fetchProfileById,
   toAppUser,
   type AppUser,
@@ -13,16 +14,13 @@ import {
 const SESSION_COOKIE = 'commhub_session'
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7 // 7 days
 
+/**
+ * The same value MUST be set in mini-services/realtime-service/.env so
+ * socket handshakes verify with the same secret.
+ */
 function getSecret(): Uint8Array {
-  // Session secret comes exclusively from the environment — never hardcoded.
-  // Generate one with: openssl rand -hex 32  (see .env.example / README.md).
   const secret = process.env.SESSION_SECRET
-  if (!secret) {
-    throw new Error(
-      '[config] SESSION_SECRET is not set. Copy .env.example to .env.local ' +
-        'and generate a secret with: openssl rand -hex 32 (see README.md).'
-    )
-  }
+  if (!secret) throw new Error('[config] Missing SESSION_SECRET — copy .env.example to .env.')
   return new TextEncoder().encode(secret)
 }
 
@@ -44,34 +42,86 @@ export async function verifySessionToken(token: string): Promise<string | null> 
   }
 }
 
-export async function setSessionCookie(userId: string): Promise<void> {
+/**
+ * Session transport.
+ *
+ * The app is embedded in a cross-site iframe by the platform preview panel.
+ * Browsers REJECT `SameSite=Lax` cookies in that context (the exact root
+ * cause of the recurring "You do not have permission to do that." /
+ * "Statistics are unavailable right now." dashboard failures: login returned
+ * 200 but the session cookie was never stored, so every admin API 401/403'd).
+ *
+ * Fix: SameSite=None + Secure + Partitioned (CHIPS) so the session cookie
+ * survives third-party iframe contexts, plus an Authorization: Bearer
+ * fallback for browsers that block third-party cookies entirely (Safari ITP).
+ * Both transports carry the SAME signed JWT and go through the SAME
+ * server-side verification chain — this is a transport fix only, all
+ * authorization checks (requireAdmin / role / blocked) are unchanged.
+ */
+export async function setSessionCookie(userId: string): Promise<string> {
   const token = await createSessionToken(userId)
   const store = await cookies()
   store.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: false,
+    sameSite: 'none',
+    secure: true,
+    partitioned: true,
     maxAge: SESSION_TTL_SECONDS,
     path: '/',
   })
+  return token
 }
 
 export async function clearSessionCookie(): Promise<void> {
   const store = await cookies()
-  store.delete(SESSION_COOKIE)
+  // The deletion MUST carry the same attributes as the set (Secure +
+  // SameSite=None + Partitioned): Chrome refuses to delete a strictly-secure
+  // cookie via a plain non-Secure expired cookie, which would leave the
+  // session alive and auto-login the user again after logout.
+  store.set(SESSION_COOKIE, '', {
+    httpOnly: true,
+    sameSite: 'none',
+    secure: true,
+    partitioned: true,
+    maxAge: 0,
+    expires: new Date(0),
+    path: '/',
+  })
+}
+
+/** Extract the uid from an Authorization: Bearer header value. */
+export async function verifyBearerHeader(
+  authHeader: string | null | undefined
+): Promise<string | null> {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null
+  return verifySessionToken(authHeader.slice(7).trim())
 }
 
 /**
  * Resolve the current authenticated user straight from Supabase
  * (mux_profiles). The JWT only carries the user id — role / verification /
  * blocked status is always re-checked server-side so tokens can never hold
- * stale privileges.
+ * stale privileges. Session transport: httpOnly cookie first, then the
+ * Authorization: Bearer fallback (iframe contexts where the cookie is
+ * blocked). Both are the SAME token, verified the SAME way.
  */
 export async function getCurrentUser(): Promise<AppUser | null> {
   const store = await cookies()
   const token = store.get(SESSION_COOKIE)?.value
-  if (!token) return null
-  const userId = await verifySessionToken(token)
+  let userId: string | null = null
+  if (token) {
+    userId = await verifySessionToken(token)
+  }
+  if (!userId) {
+    // Bearer fallback — headers() is available in route handlers; guard for
+    // any non-request context (build/prerender) where it would throw.
+    try {
+      const hdrs = await headers()
+      userId = await verifyBearerHeader(hdrs.get('authorization'))
+    } catch {
+      /* outside a request scope — no bearer transport available */
+    }
+  }
   if (!userId) return null
   const profile = await fetchProfileById(userId)
   if (!profile) return null
@@ -103,21 +153,9 @@ export async function requireAdmin(): Promise<AppUser | null> {
  * row-level security instead of the service role. Grants therefore run on an
  * isolated client whose session state never leaks anywhere.
  */
-const authGrantClient = createClient(SUPABASE_URL_RESOLVED, serviceSecretKey(), {
+const authGrantClient = createClient(SUPABASE_URL_RESOLVED, requireEnv('SUPABASE_SECRET_KEY'), {
   auth: { persistSession: false, autoRefreshToken: false },
 })
-
-/** The service-role key — env-only (never hardcoded; see .env.example). */
-function serviceSecretKey(): string {
-  const key = process.env.SUPABASE_SECRET_KEY
-  if (!key) {
-    throw new Error(
-      '[config] SUPABASE_SECRET_KEY is not set. Copy .env.example to .env.local ' +
-        'and fill it in (see README.md → Environment Variables).'
-    )
-  }
-  return key
-}
 
 /** Verify email+password. Returns the auth user id, or null on bad creds. */
 export async function verifyPassword(email: string, password: string): Promise<string | null> {

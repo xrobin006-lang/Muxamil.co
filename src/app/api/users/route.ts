@@ -4,8 +4,9 @@ import { getActiveUser } from '@/lib/auth'
 import { supabase } from '@/lib/supabase'
 
 /**
- * People discovery + search. Only public profile fields are ever returned —
- * no emails, no private data.
+ * People directory — VERIFIED, ACTIVE members only (contract §14).
+ * Search `q` matches full_name/username. Only public profile fields are
+ * ever returned — no emails, no private data.
  */
 export async function GET(req: NextRequest) {
   return guard(async () => {
@@ -20,10 +21,18 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(30, Math.max(1, parseInt(req.nextUrl.searchParams.get('limit') || '20', 10) || 20))
 
     const columns = 'id, full_name, username, avatar_url, bio, role, is_verified, created_at'
-    let listQuery = supabase.from('mux_profiles').select(columns).neq('status', 'blocked')
-    let countQuery = supabase.from('mux_profiles').select('id', { count: 'exact', head: true }).neq('status', 'blocked')
+    let listQuery = supabase
+      .from('mux_profiles')
+      .select(columns)
+      .eq('is_verified', true)
+      .eq('status', 'active')
+    let countQuery = supabase
+      .from('mux_profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_verified', true)
+      .eq('status', 'active')
     if (q) {
-      const or = `full_name.ilike.%${q}%,username.ilike.%${q}%,email.ilike.%${q}%`
+      const or = `full_name.ilike.%${q}%,username.ilike.%${q}%`
       listQuery = listQuery.or(or)
       countQuery = countQuery.or(or)
     }

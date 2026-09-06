@@ -1,143 +1,115 @@
-import { NextRequest } from 'next/server'
+import { NextRequest, after } from 'next/server'
 import { supabase, freshId, nowIso, slugify, storagePathFromUrl } from '@/lib/supabase'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser, requireAdmin } from '@/lib/auth'
-import { emitRealtime } from '@/lib/realtime'
+import { emitRealtime, notifyNewPost } from '@/lib/realtime'
+import { runAiEngagementForPost } from '@/lib/ai-automation'
 import { officialPostSchema, sanitizeLink } from '@/lib/validators'
-import type { AttachmentDTO, PostDTO } from '@/lib/types'
+import { POST_SELECT, decoratePosts, type PostRowFull } from '@/lib/post-dto'
 
-// ---------------------------------------------------------------------------
-// mux_posts / mux_post_attachments row → DTO mapping
-// ---------------------------------------------------------------------------
+/** Feed visibility: published now — drafts and future-scheduled posts are hidden. */
+const FEED_FILTERS = { is_published: true, notStatuses: ['scheduled', 'draft'] as const }
 
-type AttachmentRow = {
-  id: string
-  file_name: string | null
-  file_url: string | null
-  file_type: string | null
-  mime_type: string | null
-  file_size: number | null
+function feedQuery() {
+  let q = supabase.from('mux_posts').select(POST_SELECT).eq('is_published', true)
+  for (const s of FEED_FILTERS.notStatuses) q = q.neq('status', s)
+  return q
 }
 
 /**
- * mux_post_attachments.file_type only stores image|video|audio|document.
- * PDFs are stored as document + application/pdf mime — mapped back to 'pdf'.
- */
-function attachmentOut(a: AttachmentRow): AttachmentDTO {
-  const mime = a.mime_type || ''
-  let fileType: AttachmentDTO['fileType'] = 'document'
-  if (a.file_type === 'image' || a.file_type === 'video' || a.file_type === 'audio') {
-    fileType = a.file_type
-  } else if (mime.startsWith('application/pdf')) {
-    fileType = 'pdf'
-  }
-  return {
-    id: a.id,
-    fileType,
-    fileName: a.file_name || '',
-    url: a.file_url ?? null,
-    mimeType: mime,
-    fileSize: a.file_size ?? 0,
-    linkUrl: null,
-  }
-}
-
-type PostRow = {
-  id: string
-  title: string | null
-  content: string | null
-  post_type: string | null
-  link_url: string | null
-  status: string | null
-  is_published: boolean | null
-  created_at: string
-  updated_at: string
-  author_id: string
-  author: {
-    id: string
-    full_name: string | null
-    username: string | null
-    avatar_url: string | null
-    role: string | null
-  } | null
-  mux_post_attachments: AttachmentRow[] | null
-}
-
-function postOut(p: PostRow): PostDTO {
-  return {
-    id: p.id,
-    title: p.title || '',
-    content: p.content || '',
-    postType: p.post_type || 'article',
-    linkUrl: p.link_url ?? null,
-    status: p.status || (p.is_published ? 'published' : 'draft'),
-    isPublished: !!p.is_published,
-    createdAt: p.created_at,
-    updatedAt: p.updated_at,
-    author: {
-      id: p.author?.id || p.author_id,
-      fullName: p.author?.full_name || '',
-      username: p.author?.username || '',
-      avatarUrl: p.author?.avatar_url ?? null,
-      role: p.author?.role || 'user',
-    },
-    attachments: (p.mux_post_attachments ?? []).map(attachmentOut),
-  }
-}
-
-const POST_SELECT =
-  'id,title,content,post_type,link_url,status,is_published,created_at,updated_at,author_id,' +
-  'author:mux_profiles!mux_posts_author_id_fkey(id,full_name,username,avatar_url,role),' +
-  'mux_post_attachments(id,file_name,file_url,file_type,mime_type,file_size,sort_order)'
-
-/**
- * Official admin feed (published mux_posts only) with keyset cursor pagination.
- * Cursor format: `${createdAt}|${id}` (createdAt normalized to ISO/Z).
+ * Member feed with server-side filters:
+ *   q          → title/content ilike search
+ *   category   → category slug
+ *   type       → post_type (article|announcement|tutorial|image|video|pdf|link|audio)
+ *   pinned     → 'only' for pinned posts
+ *   sort       → 'latest' (default, keyset cursor) | 'popular' (views desc, `page` offset)
  */
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const user = await getActiveUser()
     if (!user) return errors.unauthorized()
 
-    const limit = Math.min(
-      30,
-      Math.max(1, parseInt(req.nextUrl.searchParams.get('limit') || '10', 10) || 10)
-    )
-    const cursor = req.nextUrl.searchParams.get('cursor')
+    const sp = req.nextUrl.searchParams
+    const limit = Math.min(30, Math.max(1, parseInt(sp.get('limit') || '10', 10) || 10))
+    const sort = sp.get('sort') === 'popular' ? 'popular' : 'latest'
+    // Commas/parens/quotes would break the PostgREST or-filter syntax.
+    const q = (sp.get('q') || '').trim().replace(/[,()"']/g, '')
+    const categorySlug = (sp.get('category') || '').trim().replace(/[,()"']/g, '')
+    const type = (sp.get('type') || '').trim().replace(/[,()"']/g, '')
+    const pinnedOnly = sp.get('pinned') === 'only'
+    const page = Math.min(500, Math.max(0, parseInt(sp.get('page') || '0', 10) || 0))
+    const cursor = sp.get('cursor')
 
-    let q = supabase.from('mux_posts').select(POST_SELECT).eq('is_published', true)
+    let query = feedQuery()
 
+    if (q) query = query.or(`title.ilike.%${q}%,content.ilike.%${q}%`)
+    if (type) query = query.eq('post_type', type)
+    if (pinnedOnly) query = query.eq('is_pinned', true)
+
+    if (categorySlug) {
+      const { data: cat, error: catError } = await supabase
+        .from('mux_categories')
+        .select('id')
+        .eq('slug', categorySlug)
+        .maybeSingle()
+      if (catError) throw new Error(catError.message)
+      // Unknown category → definitively empty page (no fallback results).
+      if (!cat) return ok({ posts: [], nextCursor: null, hasMore: false })
+      query = query.eq('category_id', cat.id)
+    }
+
+    let rows: PostRowFull[]
+    let hasMore = false
+
+    if (sort === 'popular') {
+      // Offset pagination for the popularity ranking (no cursor).
+      const { data, error } = await query
+        .order('views_count', { ascending: false })
+        .order('id', { ascending: false })
+        .order('sort_order', { referencedTable: 'mux_post_attachments', ascending: true })
+        .range(page * limit, page * limit + limit)
+      if (error) throw new Error(error.message)
+      rows = (data ?? []) as unknown as PostRowFull[]
+      hasMore = rows.length > limit
+      rows = rows.slice(0, limit)
+      // AI activity fields are admin-only (spec §11) — members get zeros.
+      const posts = await decoratePosts(rows, user.id, user.role === 'admin')
+      return ok({ posts, nextCursor: null, hasMore })
+    }
+
+    // Latest: keyset cursor pagination on (created_at, id).
     if (cursor) {
       const sep = cursor.lastIndexOf('|')
       if (sep > 0) {
         const ts = cursor.slice(0, sep)
         const id = cursor.slice(sep + 1)
-        q = q.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${id})`)
+        query = query.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${id})`)
       }
     }
-
-    const { data, error } = await q
+    const { data, error } = await query
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .order('sort_order', { referencedTable: 'mux_post_attachments', ascending: true })
       .limit(limit + 1)
-
     if (error) throw new Error(error.message)
 
-    const rows = (data ?? []) as unknown as PostRow[]
-    const hasMore = rows.length > limit
-    const page = rows.slice(0, limit)
-    const last = page[page.length - 1]
+    rows = ((data ?? []) as unknown as PostRowFull[]).slice(0, Math.max(0, limit + 1))
+    hasMore = rows.length > limit
+    const pageRows = rows.slice(0, limit)
+    const last = pageRows[pageRows.length - 1]
     const nextCursor =
       hasMore && last ? `${new Date(last.created_at).toISOString()}|${last.id}` : null
 
-    return ok({ posts: page.map(postOut), nextCursor })
+    // AI activity fields are admin-only (spec §11) — members get zeros.
+    const posts = await decoratePosts(pageRows, user.id, user.role === 'admin')
+    return ok({ posts, nextCursor, hasMore })
   })
 }
 
 /**
- * Admin-only: publish an official post. Attachments are uploaded beforehand
- * via /api/upload (Supabase Storage public URLs) and referenced here.
+ * Admin-only: create an official post. Supports publishing immediately,
+ * saving as draft, or scheduling to a future publishedAt. CTA buttons are
+ * stored as mux_post_attachments rows with file_type='cta'.
  */
 export async function POST(req: NextRequest) {
   return guard(async () => {
@@ -149,14 +121,48 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) {
       return fail(parsed.error.issues[0]?.message ?? 'Invalid post details.')
     }
+    const input = parsed.data
+
+    const status = input.status ?? 'published'
 
     let linkUrl: string | null = null
-    if (parsed.data.linkUrl && parsed.data.linkUrl.trim()) {
-      linkUrl = sanitizeLink(parsed.data.linkUrl)
+    if (input.linkUrl && input.linkUrl.trim()) {
+      linkUrl = sanitizeLink(input.linkUrl)
       if (!linkUrl) return fail('The link must be a valid http(s) URL.')
     }
 
-    const attachments = parsed.data.attachments ?? []
+    // Scheduled posts REQUIRE a future publishedAt.
+    let publishedAt: string | null = null
+    if (status === 'scheduled') {
+      if (!input.publishedAt) return fail('Please choose a future publish date for a scheduled post.')
+      const ts = Date.parse(input.publishedAt)
+      if (isNaN(ts) || ts <= Date.now()) return fail('Scheduled posts need a publish date in the future.')
+      publishedAt = new Date(ts).toISOString()
+    } else if (input.publishedAt) {
+      const ts = Date.parse(input.publishedAt)
+      if (isNaN(ts)) return fail('Please provide a valid publish date.')
+      publishedAt = new Date(ts).toISOString()
+    }
+
+    // Category must exist when assigned.
+    if (input.categoryId) {
+      const { data: cat } = await supabase
+        .from('mux_categories')
+        .select('id')
+        .eq('id', input.categoryId)
+        .maybeSingle()
+      if (!cat) return fail('Category not found.')
+    }
+
+    // Sanitize CTA destinations (exact URLs kept — never rewritten).
+    const ctaButtons: { label: string; url: string }[] = []
+    for (const cta of input.ctaButtons ?? []) {
+      const clean = sanitizeLink(cta.url)
+      if (!clean) return fail(`The button "${cta.label}" needs a valid http(s) URL.`)
+      ctaButtons.push({ label: cta.label, url: clean })
+    }
+
+    const attachments = input.attachments ?? []
     const hasVideo = attachments.some((a) => a.fileType === 'video')
     const hasDocument = attachments.some((a) => a.fileType === 'pdf' || a.fileType === 'document')
     const hasImage = attachments.some((a) => a.fileType === 'image')
@@ -166,94 +172,111 @@ export async function POST(req: NextRequest) {
         ? 'pdf'
         : hasImage
           ? 'image'
-          : linkUrl
+          : linkUrl || ctaButtons.length > 0
             ? 'link'
             : 'article'
 
     const now = nowIso()
     const postId = freshId()
+    const isPublished = status === 'published'
 
     const { error: postError } = await supabase.from('mux_posts').insert({
       id: postId,
-      title: parsed.data.title,
-      slug: slugify(parsed.data.title),
-      content: parsed.data.content,
-      excerpt: parsed.data.content.slice(0, 160),
+      title: input.title,
+      slug: slugify(input.title),
+      content: input.content,
+      excerpt: input.content.slice(0, 160),
       author_id: admin.id,
-      is_published: true,
-      status: 'published',
+      is_published: isPublished,
+      status,
+      is_pinned: input.isPinned ?? false,
       post_type: postType,
       link_url: linkUrl,
-      published_at: now,
+      category_id: input.categoryId ?? null,
+      published_at: isPublished ? (publishedAt ?? now) : publishedAt,
       created_at: now,
       updated_at: now,
       views_count: 0,
       views_real: 0,
+      view_count_adjustment: 0,
       likes_count: 0,
       likes_real: 0,
+      like_count_adjustment: 0,
     })
     if (postError) throw new Error(postError.message)
 
-    const attRows = attachments.map((a, i) => ({
+    const mediaRows = attachments.map((a, i) => ({
       id: freshId(),
       post_id: postId,
       author_id: admin.id,
       file_name: a.fileName,
       file_url: a.url,
-      // 'pdf' is a UI-only concept — stored as 'document' + pdf mime
-      file_type: a.fileType === 'pdf' ? 'document' : a.fileType,
+      // 'pdf'/'audio' are UI-only concepts — the DB CHECK only allows
+      // image|video|document, so both are stored as 'document' + their mime.
+      file_type: a.fileType === 'pdf' || a.fileType === 'audio' ? 'document' : a.fileType,
       mime_type: a.mimeType,
       file_size: a.fileSize,
       file_path: storagePathFromUrl(a.url),
       sort_order: i,
       created_at: now,
     }))
-    if (attRows.length > 0) {
-      const { error: attError } = await supabase.from('mux_post_attachments').insert(attRows)
+    // CTA buttons ride the same attachment table, ordered AFTER all media.
+    // file_type must satisfy the DB CHECK (image|video|document) → 'document'
+    // with mime_type='cta' as the discriminator.
+    const ctaRows = ctaButtons.map((cta, i) => ({
+      id: freshId(),
+      post_id: postId,
+      author_id: admin.id,
+      file_name: cta.label,
+      file_url: cta.url,
+      file_type: 'document',
+      mime_type: 'cta',
+      file_size: 0,
+      file_path: null,
+      sort_order: attachments.length + i,
+      created_at: now,
+    }))
+    const allRows = [...mediaRows, ...ctaRows]
+    if (allRows.length > 0) {
+      const { error: attError } = await supabase.from('mux_post_attachments').insert(allRows)
       if (attError) throw new Error(attError.message)
     }
 
-    // Best-effort re-fetch with embeds so the DTO exactly matches GET's shape.
+    // Re-fetch with embeds so the DTO exactly matches GET's shape.
     const { data: created } = await supabase
       .from('mux_posts')
       .select(POST_SELECT)
       .eq('id', postId)
+      .order('sort_order', { referencedTable: 'mux_post_attachments', ascending: true })
       .maybeSingle()
     if (created) {
-      const full = postOut(created as unknown as PostRow)
-      await emitRealtime({ event: 'feed:new-post', room: 'all', payload: full })
+      const [full] = await decoratePosts([created as unknown as PostRowFull], admin.id)
+      // Realtime only fires when the post is live immediately — drafts and
+      // scheduled posts stay silent until they are actually published.
+      if (isPublished) {
+        await emitRealtime({ event: 'feed:new-post', room: 'all', payload: full })
+        // NEW_POST notification fan-out (spec §33): one DB row per active
+        // member + realtime + push. Idempotent (uuidv5 ids) so a retry or
+        // double-click never duplicates. Failure never blocks the publish.
+        try {
+          await notifyNewPost({
+            id: postId,
+            title: input.title,
+            slug: (created as { slug?: string | null }).slug ?? slugify(input.title),
+            actorId: admin.id,
+          })
+        } catch (err) {
+          console.error('[posts] new-post notification fan-out failed:', (err as Error).message)
+        }
+        // AI auto-engagement (spec §37) — strictly after the response so a
+        // slow/failing LLM can never block or roll back the publication.
+        after(() => {
+          runAiEngagementForPost(postId).catch(() => {})
+        })
+      }
       return ok({ post: full })
     }
 
-    // Fallback: assemble the DTO from what we just wrote.
-    const dto: PostDTO = {
-      id: postId,
-      title: parsed.data.title,
-      content: parsed.data.content,
-      postType,
-      linkUrl,
-      status: 'published',
-      isPublished: true,
-      createdAt: now,
-      updatedAt: now,
-      author: {
-        id: admin.id,
-        fullName: admin.fullName,
-        username: admin.username,
-        avatarUrl: admin.avatarUrl,
-        role: admin.role,
-      },
-      attachments: attachments.map((a, i) => ({
-        id: attRows[i].id,
-        fileType: a.fileType,
-        fileName: a.fileName,
-        url: a.url,
-        mimeType: a.mimeType,
-        fileSize: a.fileSize,
-        linkUrl: null,
-      })),
-    }
-    await emitRealtime({ event: 'feed:new-post', room: 'all', payload: dto })
-    return ok({ post: dto })
+    return ok({ success: true, id: postId })
   })
 }

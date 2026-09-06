@@ -37,14 +37,6 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules",
-    "skills",
-    "mini-services",
-    "agent-ctx",
-    "qa-shots",
-    "tool-results",
-    "db",
-    "prisma",
-    "*.config.*"
+    "node_modules"
   ]
 }

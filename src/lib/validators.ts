@@ -42,6 +42,12 @@ export const communitySchema = z.object({
   coverUrl: z.string().trim().max(2000).nullable().optional(),
 })
 
+/** ISO timestamp helper (accepts any parseable ISO 8601 string). */
+const isoTimestamp = z
+  .string()
+  .trim()
+  .refine((v) => !isNaN(Date.parse(v)), 'Please provide a valid date.')
+
 export const officialPostSchema = z.object({
   title: z.string().trim().min(3, 'Title must be at least 3 characters.').max(120, 'Title must be at most 120 characters.'),
   content: z.string().trim().min(1, 'Post cannot be empty.').max(8000, 'Post must be 8000 characters or fewer.'),
@@ -57,6 +63,24 @@ export const officialPostSchema = z.object({
       })
     )
     .max(12, 'A post can have at most 12 attachments.')
+    .optional(),
+  /** published (default) | draft | scheduled (requires future publishedAt). */
+  status: z.enum(['published', 'draft', 'scheduled']).optional(),
+  /** Required (and must be in the future) when status='scheduled'. */
+  publishedAt: isoTimestamp.optional(),
+  /** mux_categories id — null clears the assignment. */
+  categoryId: z.string().uuid('Category not found.').nullable().optional(),
+  /** Pin the post to the top of the feed. */
+  isPinned: z.boolean().optional(),
+  /** CTA buttons — stored as mux_post_attachments rows with file_type='cta'. */
+  ctaButtons: z
+    .array(
+      z.object({
+        label: z.string().trim().min(1, 'Button label cannot be empty.').max(60, 'Button label is too long.'),
+        url: z.string().trim().min(1).max(2000, 'Button URL is too long.'),
+      })
+    )
+    .max(4, 'A post can have at most 4 buttons.')
     .optional(),
 })
 

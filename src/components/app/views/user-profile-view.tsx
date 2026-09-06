@@ -2,28 +2,53 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { CalendarDays, ChevronRight, RefreshCw, ShieldCheck, UserX, UsersRound } from 'lucide-react'
+import {
+  CalendarDays,
+  Check,
+  ChevronRight,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  UserCheck,
+  UserPlus,
+  UserX,
+  UsersRound,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ApiError, apiGet } from '@/lib/api-client'
+import { ApiError, apiGet, apiJson } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
-import { formatFullDate } from '@/lib/format'
+import { formatCount, formatFullDate } from '@/lib/format'
 import type { CommunityDTO } from '@/lib/types'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
 import { EmptyState } from '../components/empty-state'
 
+/** GET /api/users/[id] → the follow fields live INSIDE `user` (live-verified):
+ *  followersCount, followingCount, isFollowing are siblings of isVerified.
+ *  followersDisplayCount = real + admin override (equals real when unset,
+ *  never negative) — older cached shapes may lack it, hence optional. */
 type PublicUserDTO = {
   id: string
   fullName: string
   username: string
   avatarUrl: string | null
-  bannerUrl: string | null
+  bannerUrl?: string | null
   bio: string
   role: 'admin' | 'user'
   isVerified: boolean
   createdAt: string
+  followersCount?: number
+  followersDisplayCount?: number
+  followingCount?: number
+  isFollowing?: boolean
+}
+
+/** POST /api/users/[id]/follow → {following, followersCount} (toggle). */
+type FollowResponse = {
+  following: boolean
+  followersCount: number
 }
 
 /**
@@ -48,27 +73,6 @@ function AdminChip() {
   )
 }
 
-/** Banner surface: uploaded image or brand gradient fallback. */
-function ProfileBanner({ url, className }: { url: string | null; className?: string }) {
-  if (url) {
-    return (
-      <div className={`relative ${className ?? ''}`}>
-        <img src={url} alt="Profile banner" className="h-full w-full object-cover" loading="lazy" />
-        <div
-          className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-card/60 to-transparent"
-          aria-hidden="true"
-        />
-      </div>
-    )
-  }
-  return (
-    <div
-      className={`bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 ${className ?? ''}`}
-      aria-hidden="true"
-    />
-  )
-}
-
 export default function UserProfileView({ userId }: { userId: string }) {
   const navigate = useAppStore((s) => s.navigate)
   const back = useAppStore((s) => s.back)
@@ -80,6 +84,7 @@ export default function UserProfileView({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [followPending, setFollowPending] = useState(false)
 
   /** Live presence for the viewed profile (admins: "an admin is online"). */
   const isOnline = data ? (data.user.role === 'admin' ? adminOnline : onlineIds.has(data.user.id)) : false
@@ -107,6 +112,73 @@ export default function UserProfileView({ userId }: { userId: string }) {
     load()
   }, [load])
 
+  /** Toggle follow — optimistic, reverts on failure. Gate 403 → friendly toast.
+   *  The displayed count keeps the same admin adjustment across the flip:
+   *  displayed = real + (displayedBefore − realBefore). */
+  const toggleFollow = async () => {
+    if (!data || followPending) return
+    const prev = {
+      followersCount: data.user.followersCount ?? 0,
+      followersDisplayCount: data.user.followersDisplayCount ?? data.user.followersCount ?? 0,
+      isFollowing: data.user.isFollowing ?? false,
+    }
+    const nextFollowing = !prev.isFollowing
+    const delta = nextFollowing ? 1 : -1
+    const adjustment = prev.followersDisplayCount - prev.followersCount
+    setFollowPending(true)
+    setData({
+      ...data,
+      user: {
+        ...data.user,
+        isFollowing: nextFollowing,
+        followersCount: Math.max(0, prev.followersCount + delta),
+        followersDisplayCount: Math.max(0, prev.followersCount + delta + adjustment),
+      },
+    })
+    try {
+      const res = await apiJson<FollowResponse>(
+        `/api/users/${encodeURIComponent(data.user.id)}/follow`,
+        'POST',
+      )
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              user: {
+                ...d.user,
+                isFollowing: res.following,
+                followersCount: res.followersCount,
+                followersDisplayCount: Math.max(0, res.followersCount + adjustment),
+              },
+            }
+          : d,
+      )
+      toast.success(res.following ? `Following ${data.user.fullName}.` : `Unfollowed ${data.user.fullName}.`)
+    } catch (err) {
+      // Revert the optimistic flip before surfacing the error.
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              user: {
+                ...d.user,
+                isFollowing: prev.isFollowing,
+                followersCount: prev.followersCount,
+                followersDisplayCount: prev.followersDisplayCount,
+              },
+            }
+          : d,
+      )
+      if (err instanceof ApiError && err.status === 403) {
+        toast.error('Follows are disabled')
+      } else {
+        toast.error(err instanceof Error ? err.message : 'Could not update follow.')
+      }
+    } finally {
+      setFollowPending(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-4" aria-busy="true" aria-label="Loading profile">
@@ -121,6 +193,7 @@ export default function UserProfileView({ userId }: { userId: string }) {
               <Skeleton className="h-4 w-2/3 max-w-sm" />
             </div>
             <Skeleton className="mt-4 h-3 w-40" />
+            <Skeleton className="mt-4 h-8 w-56" />
           </div>
         </div>
         <div className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5">
@@ -170,21 +243,32 @@ export default function UserProfileView({ userId }: { userId: string }) {
 
   const { user, community } = data
   const isOwnProfile = user.id === currentUser.id
+  const isFollowing = user.isFollowing ?? false
+  // Displayed count = real + admin override (falls back to the real count for
+  // older cached responses that lack the new field).
+  const followersCount = user.followersDisplayCount ?? user.followersCount ?? 0
+  const followingCount = user.followingCount ?? 0
 
   return (
     <div className="space-y-4">
       {/* Profile header */}
       <section className="overflow-hidden rounded-2xl border bg-card shadow-sm">
-        <ProfileBanner url={user.bannerUrl} className="h-28 sm:h-36" />
+        {user.bannerUrl ? (
+          <img
+            src={user.bannerUrl}
+            alt={`${user.fullName}'s profile banner`}
+            className="h-28 w-full object-cover sm:h-36"
+          />
+        ) : (
+          <div
+            className="h-28 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-36"
+            aria-hidden="true"
+          />
+        )}
         <div className="px-4 pb-5 sm:px-6">
           <div className="-mt-12 flex flex-wrap items-end justify-between gap-3 sm:-mt-14">
             <div className="relative">
-              <UserAvatar
-                name={user.fullName || 'Member'}
-                url={user.avatarUrl}
-                size="xl"
-                className="ring-4 ring-card"
-              />
+              <UserAvatar name={user.fullName} url={user.avatarUrl} size="xl" className="ring-4 ring-card" />
               {isOnline && (
                 <span
                   className="presence-dot absolute bottom-1 right-1 h-5 w-5 rounded-full border-4 border-card bg-emerald-500"
@@ -193,18 +277,34 @@ export default function UserProfileView({ userId }: { userId: string }) {
                 />
               )}
             </div>
-            {/* Own profile is edited from the private profile view. Public
-                profiles deliberately expose NO message/DM action. */}
-            {isOwnProfile && (
+            {/* Own profile is edited from the private profile view; other
+                profiles offer a follow toggle (hidden for yourself). */}
+            {isOwnProfile ? (
               <Button variant="outline" onClick={() => navigate({ name: 'profile' })}>
                 Edit profile
+              </Button>
+            ) : (
+              <Button
+                variant={isFollowing ? 'outline' : 'default'}
+                onClick={toggleFollow}
+                disabled={followPending}
+                aria-pressed={isFollowing}
+              >
+                {followPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : isFollowing ? (
+                  <UserCheck className="mr-2 h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <UserPlus className="mr-2 h-4 w-4" aria-hidden="true" />
+                )}
+                {isFollowing ? 'Following' : 'Follow'}
               </Button>
             )}
           </div>
 
           <div className="mt-3">
             <h2 className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xl font-bold tracking-tight sm:text-2xl" dir="auto">
-              <span>{user.fullName || 'Member'}</span>
+              <span>{user.fullName}</span>
               {user.isVerified && <VerifiedBadge size={19} />}
               {user.role === 'admin' && <AdminChip />}
             </h2>
@@ -223,6 +323,26 @@ export default function UserProfileView({ userId }: { userId: string }) {
                 {user.bio}
               </p>
             )}
+
+            {/* Follow stats — real counts from the profile endpoint. */}
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm" aria-label="Follow statistics">
+              <span className="inline-flex items-center gap-1.5">
+                <UsersRound className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="font-semibold tabular-nums" title={`${followersCount.toLocaleString()} followers`}>{formatCount(followersCount)}</span>
+                <span className="text-muted-foreground">
+                  Follower{followersCount === 1 ? '' : 's'}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                {isFollowing ? (
+                  <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                ) : (
+                  <UserCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                )}
+                <span className="font-semibold tabular-nums" title={`${followingCount.toLocaleString()} following`}>{formatCount(followingCount)}</span>
+                <span className="text-muted-foreground">Following</span>
+              </span>
+            </div>
 
             <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
               <CalendarDays className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

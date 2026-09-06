@@ -16,6 +16,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  Lock,
+  RotateCcw,
   UserRound,
   AlertTriangle,
 } from 'lucide-react'
@@ -52,7 +54,8 @@ import {
 import { apiGet, apiJson } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
-import { formatFullDate } from '@/lib/format'
+import { formatFullDate, formatCount } from '@/lib/format'
+import type { FollowerOverrideDTO } from '@/lib/types'
 import { UserAvatar } from '../../components/user-avatar'
 import { VerifiedBadge } from '../../components/verified-badge'
 import { EmptyState } from '../../components/empty-state'
@@ -73,6 +76,18 @@ type AdminUserRow = {
 }
 
 type UsersResponse = { users: AdminUserRow[]; total: number; page: number; pages: number }
+
+/** PUT /api/admin/users/[id]/followers → applied values. */
+type FollowerUpdateResponse = {
+  real: number
+  displayed: number
+  adjustment: number
+  changed: boolean
+}
+
+type FollowerActionBody = { action: 'delta' | 'set' | 'reset'; value?: number }
+
+const DELTA_BUTTONS = [1, 10, -1, -10]
 
 type ModerationAction = 'verify' | 'unverify' | 'block' | 'unblock'
 
@@ -149,6 +164,14 @@ export default function AdminUsers() {
   const [busy, setBusy] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Follower display management (spec §31/§32/§68) — one dialog at a time.
+  const [followersTarget, setFollowersTarget] = useState<AdminUserRow | null>(null)
+  const [followersData, setFollowersData] = useState<FollowerOverrideDTO | null>(null)
+  const [followersLoading, setFollowersLoading] = useState(false)
+  const [followersFailed, setFollowersFailed] = useState(false)
+  const [followersBusy, setFollowersBusy] = useState(false)
+  const [followerSetValue, setFollowerSetValue] = useState('')
+
   // Debounced search → query + back to page 1
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -214,16 +237,69 @@ export default function AdminUsers() {
     setPage(1)
   }
 
+  // --- Follower display management (spec §31/§32/§68) ---------------------
+
+  /** Open the dialog for a user and fetch their real/displayed follower stats. */
+  const openFollowers = (user: AdminUserRow) => {
+    setFollowersTarget(user)
+    setFollowersData(null)
+    setFollowersFailed(false)
+    setFollowerSetValue('')
+    setFollowersLoading(true)
+    apiGet<FollowerOverrideDTO>(`/api/admin/users/${encodeURIComponent(user.id)}/followers`)
+      .then((data) => setFollowersData(data))
+      .catch((err) => {
+        setFollowersFailed(true)
+        toast.error(err instanceof Error ? err.message : 'Could not load follower stats.')
+      })
+      .finally(() => setFollowersLoading(false))
+  }
+
+  const closeFollowers = () => {
+    if (followersBusy) return
+    setFollowersTarget(null)
+    setFollowersData(null)
+    setFollowersFailed(false)
+    setFollowerSetValue('')
+  }
+
+  /** Apply a delta/set/reset — optimistic from the server response; on 400/503
+   *  the server message is surfaced verbatim and the dialog stays open. */
+  const applyFollowerAction = async (body: FollowerActionBody) => {
+    if (!followersTarget || !followersData || followersBusy || !followersData.overrideReady) return
+    setFollowersBusy(true)
+    try {
+      const res = await apiJson<FollowerUpdateResponse>(
+        `/api/admin/users/${encodeURIComponent(followersTarget.id)}/followers`,
+        'PUT',
+        body,
+      )
+      setFollowersData({ ...followersData, real: res.real, displayed: res.displayed, adjustment: res.adjustment })
+      toast.success(res.changed ? 'Displayed follower count updated.' : 'No change — the displayed count already matches.')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The update could not be completed.')
+    } finally {
+      setFollowersBusy(false)
+    }
+  }
+
+  /** Custom absolute displayed value — validated client-side (integer ≥ 0). */
+  const submitFollowerSet = () => {
+    const raw = followerSetValue.trim()
+    if (raw === '' || !/^\d+$/.test(raw)) {
+      toast.error('Enter a whole number of 0 or more.')
+      return
+    }
+    const value = Number.parseInt(raw, 10)
+    if (!Number.isSafeInteger(value) || value < 0) {
+      toast.error('Enter a whole number of 0 or more.')
+      return
+    }
+    applyFollowerAction({ action: 'set', value })
+  }
+
   const target = actionTarget?.user ?? null
   const action = actionTarget?.action ?? null
-
-  // Nameless users (empty fullName + null username) should still read naturally
-  // in confirmation dialogs: prefer @username, fall back to fullName, then "this user".
-  const targetLabel = target
-    ? target.username
-      ? `@${target.username}`
-      : target.fullName || 'this user'
-    : 'this user'
 
   // "Online now" is a live client-side layer on top of the server filters —
   // it intersects the loaded page with the realtime presence store.
@@ -400,7 +476,7 @@ export default function AdminUsers() {
               <div className="flex min-w-0 items-center gap-3">
                 <div className="relative shrink-0">
                   <UserAvatar
-                    name={user.fullName || 'Member'}
+                    name={user.fullName}
                     url={user.avatarUrl}
                     onClick={() => navigate({ name: 'user', userId: user.id })}
                   />
@@ -419,7 +495,7 @@ export default function AdminUsers() {
                       onClick={() => navigate({ name: 'user', userId: user.id })}
                       className="truncate text-sm font-semibold leading-tight hover:underline"
                     >
-                      <span dir="auto">{user.fullName || 'Member'}</span>
+                      <span dir="auto">{user.fullName}</span>
                     </button>
                     {user.isVerified && <VerifiedBadge size={14} />}
                     {user.role === 'admin' && (
@@ -428,9 +504,7 @@ export default function AdminUsers() {
                       </span>
                     )}
                   </div>
-                  {user.username ? (
-                    <p className="truncate text-xs text-muted-foreground">@{user.username}</p>
-                  ) : null}
+                  <p className="truncate text-xs text-muted-foreground">@{user.username}</p>
                   <p className="truncate text-xs text-muted-foreground/80 sm:hidden" dir="auto">
                     {user.email}
                   </p>
@@ -491,10 +565,20 @@ export default function AdminUsers() {
               </p>
 
               {/* Actions */}
-              <div className="mt-3 flex sm:mt-0 sm:justify-end">
+              <div className="mt-3 flex items-center gap-1 sm:mt-0 sm:justify-end">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-11 w-11 rounded-full sm:h-9 sm:w-9"
+                  onClick={() => openFollowers(user)}
+                  aria-label={`Follower display for ${user.fullName}`}
+                  title="Follower display"
+                >
+                  <Users className="h-4 w-4" aria-hidden="true" />
+                </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" aria-label={`Actions for ${user.fullName || 'Member'}`}>
+                    <Button variant="ghost" size="icon" className="h-11 w-11 rounded-full sm:h-9 sm:w-9" aria-label={`Actions for ${user.fullName}`}>
                       <MoreHorizontal className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
@@ -504,6 +588,9 @@ export default function AdminUsers() {
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => navigate({ name: 'admin-messages' })}>
                       <MessageSquare className="mr-2 h-4 w-4" /> Open chat
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => openFollowers(user)}>
+                      <Users className="mr-2 h-4 w-4" /> Follower display
                     </DropdownMenuItem>
                     {user.role !== 'admin' && (
                       <>
@@ -542,7 +629,7 @@ export default function AdminUsers() {
       {!loading && users.length > 0 && !onlineOnly && (
         <div className="flex items-center justify-between gap-3 pt-1">
           <p className="text-xs text-muted-foreground">
-            {total.toLocaleString()} {total === 1 ? 'user' : 'users'}
+            {formatCount(total)} {total === 1 ? 'user' : 'users'}
           </p>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
@@ -562,7 +649,7 @@ export default function AdminUsers() {
       <AlertDialog open={action === 'verify'} onOpenChange={(open) => !open && !busy && setActionTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Verify {targetLabel}?</AlertDialogTitle>
+            <AlertDialogTitle>Verify {target ? `@${target.username}` : 'this user'}?</AlertDialogTitle>
             <AlertDialogDescription>
               Verify this user? This will give the user a Blue Tick and allow them to create and manage their personal
               community.
@@ -588,7 +675,7 @@ export default function AdminUsers() {
       <AlertDialog open={action === 'unverify'} onOpenChange={(open) => !open && !busy && setActionTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove blue tick from {targetLabel}?</AlertDialogTitle>
+            <AlertDialogTitle>Remove blue tick from {target ? `@${target.username}` : 'this user'}?</AlertDialogTitle>
             <AlertDialogDescription>
               Their personal community will become unavailable to visitors. All community data is preserved and will
               come back if you verify them again.
@@ -613,7 +700,7 @@ export default function AdminUsers() {
       <Dialog open={action === 'block'} onOpenChange={(open) => !open && !busy && setActionTarget(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Block {targetLabel}?</DialogTitle>
+            <DialogTitle>Block {target ? `@${target.username}` : 'this user'}?</DialogTitle>
             <DialogDescription>
               The account will be restricted immediately and their personal community becomes unavailable. Community
               data is preserved. They will be notified about the restriction.
@@ -648,7 +735,7 @@ export default function AdminUsers() {
       <AlertDialog open={action === 'unblock'} onOpenChange={(open) => !open && !busy && setActionTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Unblock {targetLabel}?</AlertDialogTitle>
+            <AlertDialogTitle>Unblock {target ? `@${target.username}` : 'this user'}?</AlertDialogTitle>
             <AlertDialogDescription>
               The account will be restored to full access. If they hold a blue tick, their personal community becomes
               available again.
@@ -668,6 +755,149 @@ export default function AdminUsers() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Follower display management (spec §31/§32/§68) */}
+      <Dialog open={followersTarget !== null} onOpenChange={(open) => !open && closeFollowers()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle dir="auto">Follower display — {followersTarget?.fullName}</DialogTitle>
+            <DialogDescription>
+              Control how many followers are shown publicly on this profile. Real follow relationships are never
+              modified — only the number shown publicly.
+            </DialogDescription>
+          </DialogHeader>
+
+          {followersLoading ? (
+            <div className="space-y-3" aria-busy="true" aria-label="Loading follower stats">
+              <div className="grid grid-cols-2 gap-3">
+                <Skeleton className="h-24 rounded-xl" />
+                <Skeleton className="h-24 rounded-xl" />
+              </div>
+              <Skeleton className="h-11 w-full" />
+              <Skeleton className="h-11 w-2/3" />
+            </div>
+          ) : followersFailed || !followersData ? (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">Follower stats couldn't be loaded.</p>
+              {followersTarget && (
+                <Button
+                  variant="outline"
+                  className="h-11"
+                  onClick={() => followersTarget && openFollowers(followersTarget)}
+                >
+                  Try again
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {!followersData.overrideReady && (
+                <div
+                  className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400"
+                  role="note"
+                >
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    Override storage is temporarily unreachable. Until it recovers this panel is read-only.
+                  </span>
+                </div>
+              )}
+
+              {/* Stat row — real (locked) vs displayed (public) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl border bg-muted/40 p-3">
+                  <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <Lock className="h-3 w-3 shrink-0" aria-hidden="true" /> Real followers
+                  </p>
+                  <p className="mt-1 text-2xl font-bold tabular-nums" aria-label={`${followersData.real} real followers`}>
+                    {formatCount(followersData.real)}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">Never changes from here</p>
+                </div>
+                <div className="rounded-xl border border-primary/25 bg-primary/10 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">Displayed</p>
+                  <p
+                    className="mt-1 text-2xl font-bold tabular-nums text-primary"
+                    aria-label={`${followersData.displayed} displayed followers`}
+                  >
+                    {formatCount(followersData.displayed)}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-primary/80">
+                    {followersData.adjustment === 0
+                      ? 'No adjustment'
+                      : `${followersData.adjustment > 0 ? '+' : '−'}${formatCount(Math.abs(followersData.adjustment))} adjustment`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Controls — disabled until the migration lands */}
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-2">
+                  {DELTA_BUTTONS.map((d) => (
+                    <Button
+                      key={d}
+                      variant="outline"
+                      className="h-11 tabular-nums"
+                      disabled={!followersData.overrideReady || followersBusy}
+                      onClick={() => applyFollowerAction({ action: 'delta', value: d })}
+                    >
+                      {d > 0 ? `+${d}` : `−${Math.abs(d)}`}
+                    </Button>
+                  ))}
+                </div>
+                <form
+                  className="flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    submitFollowerSet()
+                  }}
+                >
+                  <Input
+                    value={followerSetValue}
+                    onChange={(e) => setFollowerSetValue(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Displayed count"
+                    inputMode="numeric"
+                    className="h-11 flex-1 tabular-nums"
+                    disabled={!followersData.overrideReady || followersBusy}
+                    aria-label="Set displayed follower count"
+                  />
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    className="h-11 shrink-0"
+                    disabled={!followersData.overrideReady || followersBusy}
+                  >
+                    Set
+                  </Button>
+                </form>
+                <Button
+                  variant="outline"
+                  className="h-11 w-full"
+                  disabled={!followersData.overrideReady || followersBusy}
+                  onClick={() => applyFollowerAction({ action: 'reset' })}
+                >
+                  {followersBusy ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
+                  )}
+                  Reset to real count
+                </Button>
+              </div>
+
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Real follow relationships are never modified — only the number shown publicly.
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" className="h-11" onClick={closeFollowers} disabled={followersBusy}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

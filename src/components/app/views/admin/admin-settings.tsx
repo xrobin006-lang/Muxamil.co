@@ -27,7 +27,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { apiGet, apiJson } from '@/lib/api-client'
+import { apiGet, apiJson, clearSessionToken } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { timeAgo } from '@/lib/format'
 import type { AuditLogDTO, PlatformSettings } from '@/lib/types'
@@ -230,6 +230,7 @@ export default function AdminSettings() {
     } catch {
       /* best effort — clear the local session regardless */
     }
+    clearSessionToken()
     reset()
   }
 

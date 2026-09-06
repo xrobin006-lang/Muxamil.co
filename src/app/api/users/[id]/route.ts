@@ -1,7 +1,9 @@
 import { NextRequest } from 'next/server'
 import { ok, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
-import { supabase, bannerUrlOf, type MuxProfileRow } from '@/lib/supabase'
+import { supabase, type MuxProfileRow } from '@/lib/supabase'
+import { getFollowerAdjustment } from '@/lib/compat-store'
+import { AI_ACCOUNT_USERNAME } from '@/lib/types'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -21,7 +23,8 @@ type CommunityCard = {
   }
 }
 
-/** Public profile by id OR username, plus the owner's active community card. */
+/** Public profile by id OR username, plus the owner's active community card
+ *  and follow relationship stats (contract §13). */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const viewer = await getActiveUser()
@@ -40,6 +43,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (error) throw new Error(error.message)
     const profile = (profileData as MuxProfileRow | null) ?? null
     if (!profile || profile.status === 'blocked') return errors.notFound('User')
+
+    // The muxamil.ai system account is an INTERNAL identity (spec §11): it
+    // never surfaces to normal members — no public AI labels, and it is never
+    // presented as a real human profile. Admins keep visibility for audit.
+    if (profile.username === AI_ACCOUNT_USERNAME && viewer.role !== 'admin') {
+      return errors.notFound('User')
+    }
 
     // Community is only surfaced when the owner is verified and it is active.
     let communityCard: CommunityCard | null = null
@@ -70,18 +80,48 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       }
     }
 
+    // Follow stats, the viewer's own relationship, and the admin display
+    // adjustment (compat store; 0 when no override exists).
+    const [followersRes, followingRes, isFollowingRes, adjustment] = await Promise.all([
+      supabase
+        .from('mux_follows')
+        .select('id', { count: 'exact', head: true })
+        .eq('following_id', profile.id),
+      supabase
+        .from('mux_follows')
+        .select('id', { count: 'exact', head: true })
+        .eq('follower_id', profile.id),
+      supabase
+        .from('mux_follows')
+        .select('id')
+        .eq('follower_id', viewer.id)
+        .eq('following_id', profile.id)
+        .limit(1),
+      getFollowerAdjustment(profile.id),
+    ])
+    if (followersRes.error) throw new Error(followersRes.error.message)
+    if (followingRes.error) throw new Error(followingRes.error.message)
+    if (isFollowingRes.error) throw new Error(isFollowingRes.error.message)
+
     return ok({
       user: {
         id: profile.id,
         fullName: profile.full_name || '',
         username: profile.username || '',
         avatarUrl: profile.avatar_url,
-        bannerUrl: bannerUrlOf(profile),
+        bannerUrl: profile.banner_url ?? null,
         bio: profile.bio || '',
         role: profile.role === 'admin' ? 'admin' : 'user',
         isVerified: !!profile.is_verified,
         isBlocked: profile.status === 'blocked',
         createdAt: profile.created_at,
+        followersCount: followersRes.count ?? 0,
+        followingCount: followingRes.count ?? 0,
+        // Centralized displayed-follower rule (spec §31): displayed = real +
+        // admin adjustment; with no override the shown value is exactly the
+        // real count. Never below zero.
+        followersDisplayCount: Math.max(0, (followersRes.count ?? 0) + adjustment),
+        isFollowing: (isFollowingRes.data?.length ?? 0) > 0,
       },
       community: communityCard,
     })

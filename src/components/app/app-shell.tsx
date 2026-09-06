@@ -21,6 +21,11 @@ import {
   Menu,
   ChevronLeft,
   Radio,
+  Compass,
+  Bookmark,
+  Tags,
+  BarChart3,
+  Link2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -38,8 +43,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useAppStore, type View } from '@/stores/app-store'
-import { BrandWordmark } from '@/components/app/brand-logo'
 import { apiGet } from '@/lib/api-client'
+import { useServiceWorker } from '@/hooks/use-service-worker'
 import { UserAvatar } from './components/user-avatar'
 import { VerifiedBadge } from './components/verified-badge'
 import type { PublicSettings } from '@/lib/types'
@@ -61,12 +66,19 @@ import AdminApprovals from './views/admin/admin-approvals'
 import AdminCommunities from './views/admin/admin-communities'
 import AdminMessages from './views/admin/admin-messages'
 import AdminSettings from './views/admin/admin-settings'
+import AdminCategories from './views/admin/admin-categories'
+import AdminAnalytics from './views/admin/admin-analytics'
+import AdminLinks from './views/admin/admin-links'
+import ExploreView from './views/explore-view'
+import SavedView from './views/saved-view'
 
 type NavItem = { label: string; icon: typeof Home; view: View; badge?: 'notifications' | 'messages' }
 
 const USER_NAV: NavItem[] = [
   { label: 'Home', icon: Home, view: { name: 'feed' } },
+  { label: 'Explore', icon: Compass, view: { name: 'explore' } },
   { label: 'People', icon: Users, view: { name: 'people' } },
+  { label: 'Saved', icon: Bookmark, view: { name: 'saved' } },
   { label: 'Admin Chat', icon: MessageSquare, view: { name: 'chat' }, badge: 'messages' },
   { label: 'Notifications', icon: Bell, view: { name: 'notifications' }, badge: 'notifications' },
 ]
@@ -82,17 +94,22 @@ const ADMIN_NAV: NavItem[] = [
   { label: 'Messages', icon: MessagesSquare, view: { name: 'admin-messages' }, badge: 'messages' },
   { label: 'Approvals', icon: CheckCircle2, view: { name: 'admin-approvals' } },
   { label: 'Posts', icon: FileText, view: { name: 'admin-posts' } },
+  { label: 'Categories', icon: Tags, view: { name: 'admin-categories' } },
   { label: 'Users', icon: UserCheck, view: { name: 'admin-users' } },
 ]
 
 const ADMIN_NAV_SECONDARY: NavItem[] = [
+  { label: 'Analytics', icon: BarChart3, view: { name: 'admin-analytics' } },
+  { label: 'CTA Links', icon: Link2, view: { name: 'admin-links' } },
   { label: 'Communities', icon: UsersRound, view: { name: 'admin-communities' } },
   { label: 'Settings', icon: SettingsIcon, view: { name: 'admin-settings' } },
 ]
 
 const VIEW_TITLES: Record<string, string> = {
   feed: 'Home',
+  explore: 'Explore',
   people: 'People',
+  saved: 'Saved Posts',
   notifications: 'Notifications',
   chat: 'Admin Chat',
   profile: 'My Profile',
@@ -103,10 +120,29 @@ const VIEW_TITLES: Record<string, string> = {
   'admin-dashboard': 'Dashboard',
   'admin-users': 'Users',
   'admin-posts': 'Official Posts',
+  'admin-categories': 'Categories',
+  'admin-analytics': 'Analytics',
+  'admin-links': 'CTA Links',
   'admin-approvals': 'Pending Approvals',
   'admin-communities': 'Communities',
   'admin-messages': 'Messages',
   'admin-settings': 'Platform Settings',
+}
+
+/** Brand mark: fetched logo when available, otherwise the chat-bubble monogram. */
+function BrandMark({ logoUrl, platformName, size = 'md' }: { logoUrl: string | null; platformName: string; size?: 'md' | 'sm' }) {
+  const box = size === 'md' ? 'h-10 w-10' : 'h-9 w-9'
+  const icon = size === 'md' ? 'h-5 w-5' : 'h-[18px] w-[18px]'
+  if (logoUrl) {
+    return <img src={logoUrl} alt={`${platformName} logo`} className={cn(box, 'rounded-xl object-cover shadow-sm ring-1 ring-black/[0.04] dark:ring-white/10')} />
+  }
+  return (
+    <div className={cn(box, 'flex items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm')} aria-hidden="true">
+      <svg viewBox="0 0 24 24" className={icon} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+      </svg>
+    </div>
+  )
 }
 
 /** Tiny uppercase section label used between nav groups. */
@@ -125,15 +161,19 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const back = useAppStore((s) => s.back)
   const unreadNotifications = useAppStore((s) => s.unreadNotifications)
   const unreadMessages = useAppStore((s) => s.unreadMessages)
-  const realtimeStatus = useAppStore((s) => s.realtimeStatus)
+
+  // Web Push service worker (no-op where unsupported).
+  useServiceWorker()
 
   // Platform branding (site name) for the sidebar header — public endpoint.
   const [platformName, setPlatformName] = useState('Muxamil.co')
+  const [logoUrl, setLogoUrl] = useState<string | null>(null)
 
   useEffect(() => {
     apiGet<{ settings: PublicSettings }>('/api/settings')
       .then((data) => {
         if (data.settings.platform_name?.trim()) setPlatformName(data.settings.platform_name.trim())
+        setLogoUrl(data.settings.logo_url ?? null)
       })
       .catch(() => {
         /* decorative — the fallback name is shown */
@@ -211,15 +251,13 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
         onClick={() => navigate(isAdmin ? { name: 'admin-settings' } : { name: 'profile' })}
         className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <UserAvatar name={user.fullName || 'Member'} url={user.avatarUrl} size="sm" />
+        <UserAvatar name={user.fullName} url={user.avatarUrl} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1 truncate text-sm font-medium leading-tight">
-            <span className="truncate" dir="auto">{user.fullName || 'Member'}</span>
+            <span className="truncate" dir="auto">{user.fullName}</span>
             {user.isVerified && <VerifiedBadge size={14} />}
           </p>
-          {user.username ? (
-            <p className="truncate text-xs text-sidebar-foreground/60">@{user.username}</p>
-          ) : null}
+          <p className="truncate text-xs text-sidebar-foreground/60">@{user.username}</p>
         </div>
       </button>
       <button
@@ -237,10 +275,10 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
       {/* Desktop sidebar — light, premium */}
       <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-3 px-5 pb-2 pt-6">
-          {/* Official lockup — wordmark included in the artwork (no duplicate text) */}
+          <BrandMark logoUrl={logoUrl} platformName={platformName} />
           <div className="min-w-0">
-            <BrandWordmark platformName={platformName} className="h-9" />
-            <p className="mt-1 text-[11px] font-medium text-sidebar-foreground/60">
+            <p className="truncate text-base font-bold leading-tight tracking-tight" dir="auto">{platformName}</p>
+            <p className="mt-0.5 text-[11px] font-medium text-sidebar-foreground/60">
               {isAdmin ? 'Admin Console' : 'Member'}
             </p>
           </div>
@@ -272,13 +310,17 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                 className="flex w-80 max-w-[85vw] flex-col gap-0 border-sidebar-border bg-sidebar p-0 text-sidebar-foreground"
               >
                 <SheetTitle className="px-5 pb-2 pt-6 text-left">
-                  {/* Official lockup — wordmark included in the artwork */}
-                  <div className="min-w-0">
-                    <BrandWordmark platformName={platformName} className="h-9" />
-                    <p className="mt-1 text-[11px] font-medium text-sidebar-foreground/60">
-                      {isAdmin ? 'Admin Console' : 'Member'}
-                    </p>
-                  </div>
+                  <span className="flex items-center gap-3">
+                    <BrandMark logoUrl={logoUrl} platformName={platformName} size="sm" />
+                    <span className="min-w-0">
+                      <span className="block truncate text-base font-bold leading-tight tracking-tight" dir="auto">
+                        {platformName}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] font-medium text-sidebar-foreground/60">
+                        {isAdmin ? 'Admin Console' : 'Member'}
+                      </span>
+                    </span>
+                  </span>
                 </SheetTitle>
                 <div className="flex-1 space-y-1 overflow-y-auto px-3 pb-4 scrollbar-thin">
                   <SectionLabel>Menu</SectionLabel>
@@ -337,21 +379,19 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                   className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label="Account menu"
                 >
-                  <UserAvatar name={user.fullName || 'Member'} url={user.avatarUrl} size="sm" />
+                  <UserAvatar name={user.fullName} url={user.avatarUrl} size="sm" />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
                   <div className="flex items-center gap-2.5">
-                    <UserAvatar name={user.fullName || 'Member'} url={user.avatarUrl} size="sm" />
+                    <UserAvatar name={user.fullName} url={user.avatarUrl} size="sm" />
                     <div className="min-w-0">
                       <p className="flex items-center gap-1 truncate text-sm font-medium">
-                        {user.fullName || 'Member'}
+                        {user.fullName}
                         {user.isVerified && <VerifiedBadge size={13} />}
                       </p>
-                      {user.username ? (
-                        <p className="truncate text-xs text-muted-foreground">@{user.username}</p>
-                      ) : null}
+                      <p className="truncate text-xs text-muted-foreground">@{user.username}</p>
                     </div>
                   </div>
                 </DropdownMenuLabel>
@@ -380,32 +420,8 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
         <footer className="mt-auto hidden border-t bg-background py-4 lg:block">
           <div className="mx-auto flex max-w-4xl items-center justify-between px-4 text-xs text-muted-foreground">
             <p>© {new Date().getFullYear()} {platformName} — a safe, moderated community platform.</p>
-            <p
-              className="flex items-center gap-1.5"
-              aria-live="polite"
-              title={
-                realtimeStatus === 'online'
-                  ? 'Live updates are streaming.'
-                  : realtimeStatus === 'connecting'
-                    ? 'Connecting to live updates…'
-                    : 'Live updates are offline — reconnecting automatically.'
-              }
-            >
-              {realtimeStatus === 'online' ? (
-                <>
-                  <Radio className="h-3 w-3 text-primary" aria-hidden="true" /> Realtime connected
-                </>
-              ) : realtimeStatus === 'connecting' ? (
-                <>
-                  <Radio className="h-3 w-3 animate-pulse text-amber-500" aria-hidden="true" />
-                  Realtime connecting…
-                </>
-              ) : (
-                <>
-                  <Radio className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
-                  Realtime offline — reconnecting
-                </>
-              )}
+            <p className="flex items-center gap-1.5">
+              <Radio className="h-3 w-3 text-primary" aria-hidden="true" /> Realtime connected
             </p>
           </div>
         </footer>
@@ -487,8 +503,12 @@ function CurrentView() {
   switch (view.name) {
     case 'feed':
       return <FeedView />
+    case 'explore':
+      return <ExploreView initialCategory={view.categorySlug} initialQuery={view.q} />
     case 'people':
       return <PeopleView />
+    case 'saved':
+      return <SavedView />
     case 'notifications':
       return <NotificationsView />
     case 'chat':
@@ -509,6 +529,12 @@ function CurrentView() {
       return <AdminUsers />
     case 'admin-posts':
       return <AdminPosts />
+    case 'admin-categories':
+      return <AdminCategories />
+    case 'admin-analytics':
+      return <AdminAnalytics />
+    case 'admin-links':
+      return <AdminLinks />
     case 'admin-approvals':
       return <AdminApprovals />
     case 'admin-communities':

@@ -14,7 +14,6 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { BrandWordmark } from '@/components/app/brand-logo'
 import { apiGet } from '@/lib/api-client'
 import type { PublicSettings } from '@/lib/types'
 import { UserAvatar } from './components/user-avatar'
@@ -47,6 +46,28 @@ const TRUST_ITEMS = [
   { icon: BadgeCheck, label: 'Verified communities' },
 ] as const
 
+/** Shared chat-bubble brand mark used when no logo_url is configured. */
+function BrandMark({ className, iconClassName }: { className?: string; iconClassName?: string }) {
+  return (
+    <div
+      className={`flex items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ${className ?? ''}`}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        className={iconClassName ?? 'h-5 w-5'}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+      </svg>
+    </div>
+  )
+}
+
 export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'register') => void }) {
   const [branding, setBranding] = useState<PublicSettings | null>(null)
 
@@ -67,9 +88,20 @@ export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'regi
       {/* ── Sticky header ─────────────────────────────────────────── */}
       <header className="sticky top-0 z-50 border-b bg-background/80 backdrop-blur-md">
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-3 px-4 sm:px-6">
-          <div className="flex min-w-0 items-center">
-            {/* Official full lockup (icon + wordmark + tagline) — no duplicate text */}
-            <BrandWordmark platformName={platformName} className="h-9 sm:h-10" />
+          <div className="flex min-w-0 items-center gap-2.5">
+            {branding?.logo_url ? (
+              <img
+                src={branding.logo_url}
+                alt={`${platformName} logo`}
+                className="h-9 w-9 shrink-0 rounded-xl object-cover shadow-sm"
+              />
+            ) : (
+              <BrandMark className="h-9 w-9 shrink-0" iconClassName="h-5 w-5" />
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-base font-bold leading-tight tracking-tight">{platformName}</p>
+              <p className="hidden text-[11px] leading-tight text-muted-foreground sm:block">community</p>
+            </div>
           </div>
 
           <div className="flex shrink-0 items-center gap-2">

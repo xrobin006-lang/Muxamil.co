@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { apiGet, apiJson } from '@/lib/api-client'
+import { apiGet, apiJson, clearSessionToken, ApiError } from '@/lib/api-client'
 import { useAppStore, defaultViewFor } from '@/stores/app-store'
 import { useRealtime } from '@/hooks/use-realtime'
 import type { SessionUser } from '@/lib/types'
@@ -48,8 +48,14 @@ export default function CommHubApp() {
         setUnreadMessages(data.unreadMessages ?? 0)
         setMaintenance(!!data.maintenance)
         if (data.user) navigate(defaultViewFor(data.user))
-      } catch {
-        if (!cancelled) setUser(null)
+      } catch (err) {
+        if (!cancelled) {
+          setUser(null)
+          // Session genuinely invalid (401: expired token / password change /
+          // profile removed) — drop the stale Bearer fallback so the next
+          // login starts clean. Transient network errors keep the token.
+          if (err instanceof ApiError && err.status === 401) clearSessionToken()
+        }
       } finally {
         if (!cancelled) setSessionLoading(false)
       }
@@ -82,6 +88,7 @@ export default function CommHubApp() {
     } catch {
       /* best effort */
     }
+    clearSessionToken()
     reset()
     setAuthOpen(false)
   }

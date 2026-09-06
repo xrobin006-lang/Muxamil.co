@@ -234,18 +234,16 @@ export default function AdminApprovals() {
             <div className="p-4 sm:p-5">
               <div className="flex items-center gap-3">
                 <UserAvatar
-                  name={post.author.fullName || 'Member'}
+                  name={post.author.fullName}
                   url={post.author.avatarUrl}
                   onClick={() => navigate({ name: 'user', userId: post.author.id })}
                 />
                 <div className="min-w-0 flex-1">
                   <p className="flex items-center gap-1 text-sm font-semibold leading-tight" dir="auto">
-                    <span className="truncate">{post.author.fullName || 'Member'}</span>
+                    <span className="truncate">{post.author.fullName}</span>
                     {post.author.isVerified && <VerifiedBadge size={14} />}
                   </p>
-                  {post.author.username ? (
-                    <p className="truncate text-xs text-muted-foreground">@{post.author.username}</p>
-                  ) : null}
+                  <p className="truncate text-xs text-muted-foreground">@{post.author.username}</p>
                 </div>
               </div>
 
@@ -312,7 +310,7 @@ export default function AdminApprovals() {
             <AlertDialogTitle>Approve this post?</AlertDialogTitle>
             <AlertDialogDescription>
               It will be published to “{approveTarget?.community.name ?? 'the community'}” immediately and{' '}
-              {approveTarget?.author.fullName || 'the author'} will be notified.
+              {approveTarget ? approveTarget.author.fullName : 'the author'} will be notified.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -338,7 +336,7 @@ export default function AdminApprovals() {
             <DialogTitle>Reject this post?</DialogTitle>
             <DialogDescription>
               The post will be hidden from the community and{' '}
-              {rejectTarget?.author.fullName || 'the author'} will be notified. You can include a reason
+              {rejectTarget ? rejectTarget.author.fullName : 'the author'} will be notified. You can include a reason
               to help them understand the decision.
             </DialogDescription>
           </DialogHeader>

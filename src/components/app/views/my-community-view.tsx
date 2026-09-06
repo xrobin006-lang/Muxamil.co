@@ -41,7 +41,7 @@ import {
 import { apiGet, apiJson, apiUpload } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
-import { formatBytes, formatFullDate } from '@/lib/format'
+import { formatBytes, formatCount, formatFullDate } from '@/lib/format'
 import type { CommunityDTO, CommunityPostDTO } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { UserAvatar } from '../components/user-avatar'
@@ -868,10 +868,10 @@ export default function MyCommunityView() {
             </p>
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Users className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              {community.membersCount.toLocaleString()} member{community.membersCount === 1 ? '' : 's'}
+              {formatCount(community.membersCount)} member{community.membersCount === 1 ? '' : 's'}
             </p>
             <p className="text-xs text-muted-foreground">
-              {counts.all} post{counts.all === 1 ? '' : 's'}
+              {formatCount(counts.all)} post{counts.all === 1 ? '' : 's'}
             </p>
             <StatusBadge status={community.isActive ? 'active' : 'inactive'} />
           </div>

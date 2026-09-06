@@ -13,6 +13,8 @@ import {
   ArrowRight,
   Plus,
   Activity,
+  Shapes,
+  MousePointerClick,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -20,7 +22,7 @@ import { apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
 import type { AdminStats, PublicSettings } from '@/lib/types'
-import { timeAgo } from '@/lib/format'
+import { formatCount, timeAgo } from '@/lib/format'
 import { UserAvatar } from '../../components/user-avatar'
 import { VerifiedBadge } from '../../components/verified-badge'
 import { cn } from '@/lib/utils'
@@ -49,8 +51,8 @@ type StatCard = {
 }
 
 const STAT_CARDS: StatCard[] = [
-  { key: 'totalUsers', label: 'Members', icon: Users, view: { name: 'admin-users' }, sub: (s) => `${s.verifiedUsers.toLocaleString()} verified` },
-  { key: 'verifiedUsers', label: 'Verified', icon: BadgeCheck, view: { name: 'admin-users' }, sub: (s) => `of ${s.totalUsers.toLocaleString()} members` },
+  { key: 'totalUsers', label: 'Members', icon: Users, view: { name: 'admin-users' }, sub: (s) => `${formatCount(s.verifiedUsers)} verified` },
+  { key: 'verifiedUsers', label: 'Verified', icon: BadgeCheck, view: { name: 'admin-users' }, sub: (s) => `of ${formatCount(s.totalUsers)} members` },
   {
     key: 'pendingPosts',
     label: 'Pending posts',
@@ -58,10 +60,10 @@ const STAT_CARDS: StatCard[] = [
     view: { name: 'admin-approvals' },
     amber: true,
     pulse: true,
-    sub: (s) => `${s.approvedPosts.toLocaleString()} approved · ${s.rejectedPosts.toLocaleString()} rejected`,
+    sub: (s) => `${formatCount(s.approvedPosts)} approved · ${formatCount(s.rejectedPosts)} rejected`,
   },
   { key: 'unreadMessages', label: 'Unread messages', icon: MessageSquare, view: { name: 'admin-messages' }, pulse: true },
-  { key: 'activeCommunities', label: 'Communities', icon: UsersRound, view: { name: 'admin-communities' }, sub: (s) => `of ${s.totalCommunities.toLocaleString()} total` },
+  { key: 'activeCommunities', label: 'Communities', icon: UsersRound, view: { name: 'admin-communities' }, sub: (s) => `of ${formatCount(s.totalCommunities)} total` },
   { key: 'totalPosts', label: 'Official posts', icon: Megaphone, view: { name: 'admin-posts' } },
   { key: 'blockedUsers', label: 'Blocked members', icon: ShieldAlert, view: { name: 'admin-users' } },
   { key: 'totalNotifications', label: 'Notifications sent', icon: Activity, view: { name: 'admin-dashboard' } },
@@ -224,7 +226,7 @@ export default function AdminDashboard() {
                 <card.icon className="h-5 w-5" aria-hidden="true" />
               </div>
               <p className={cn('mt-3 text-2xl font-bold tabular-nums tracking-tight', card.amber && 'text-amber-700 dark:text-amber-400')}>
-                {value.toLocaleString()}
+                {formatCount(value)}
               </p>
               <p className="mt-0.5 text-sm font-medium text-muted-foreground">{card.label}</p>
               {card.sub && <p className="mt-1 truncate text-xs text-muted-foreground/80">{card.sub(stats)}</p>}
@@ -249,9 +251,36 @@ export default function AdminDashboard() {
                 : 'bg-muted text-muted-foreground',
             )}
           >
-            {stats.pendingPosts.toLocaleString()}
+            {formatCount(stats.pendingPosts)}
           </span>
         </Button>
+      </section>
+
+      {/* Control-center shortcuts */}
+      <section aria-label="Control center" className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        {(
+          [
+            { label: 'Analytics', description: 'Views, sign-ups & top posts', icon: Activity, view: { name: 'admin-analytics' } },
+            { label: 'Categories', description: 'Topics for official posts', icon: Shapes, view: { name: 'admin-categories' } },
+            { label: 'CTA buttons', description: 'Links attached to posts', icon: MousePointerClick, view: { name: 'admin-links' } },
+          ] as const
+        ).map((card) => (
+          <button
+            key={card.label}
+            type="button"
+            onClick={() => navigate(card.view)}
+            className="group rounded-2xl border bg-card p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-md focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary transition-transform duration-150 group-hover:scale-110">
+              <card.icon className="h-4.5 w-4.5" aria-hidden="true" />
+            </div>
+            <p className="mt-2.5 flex items-center gap-1 text-sm font-semibold tracking-tight">
+              {card.label}
+              <ArrowRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{card.description}</p>
+          </button>
+        ))}
       </section>
 
       {/* Recent members */}
@@ -273,15 +302,13 @@ export default function AdminDashboard() {
                   onClick={() => navigate({ name: 'user', userId: member.id })}
                   className="flex w-full items-center gap-3 px-5 py-3 text-left transition-colors hover:bg-accent/50"
                 >
-                  <UserAvatar name={member.fullName || 'Member'} url={member.avatarUrl} size="sm" />
+                  <UserAvatar name={member.fullName} url={member.avatarUrl} size="sm" />
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center gap-1 text-sm font-medium leading-tight" dir="auto">
-                      <span className="truncate">{member.fullName || 'Member'}</span>
+                      <span className="truncate">{member.fullName}</span>
                       {member.isVerified && <VerifiedBadge size={14} />}
                     </p>
-                    {member.username ? (
-                      <p className="truncate text-xs text-muted-foreground">@{member.username}</p>
-                    ) : null}
+                    <p className="truncate text-xs text-muted-foreground">@{member.username}</p>
                   </div>
                   <span className="shrink-0 text-xs text-muted-foreground">joined {timeAgo(member.createdAt)}</span>
                 </button>

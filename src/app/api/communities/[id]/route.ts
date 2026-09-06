@@ -34,9 +34,7 @@ function communityOut(c: CommunityRow): CommunityDTO {
     avatarUrl: c.avatar_url ?? null,
     coverUrl: c.cover_url ?? null,
     isActive: !!c.is_active,
-    // The owner is always a member of their community — count them so an
-    // owner-only community shows "1 member" instead of a misleading "0".
-    membersCount: (c.members_count ?? 0) + 1,
+    membersCount: c.members_count ?? 0,
     createdAt: c.created_at,
     owner: {
       id: c.owner?.id || '',

@@ -4,8 +4,11 @@ import { create } from 'zustand'
 import type { SessionUser } from '@/lib/types'
 
 export type View =
-  | { name: 'feed' }
+  /** focusPostId: deep-link target — the feed scrolls to and expands this post. */
+  | { name: 'feed'; focusPostId?: string }
+  | { name: 'explore'; categorySlug?: string; q?: string }
   | { name: 'people' }
+  | { name: 'saved' }
   | { name: 'notifications' }
   | { name: 'chat' }
   | { name: 'profile' }
@@ -16,20 +19,19 @@ export type View =
   | { name: 'admin-dashboard' }
   | { name: 'admin-users' }
   | { name: 'admin-posts' }
+  | { name: 'admin-categories' }
+  | { name: 'admin-analytics' }
+  | { name: 'admin-links' }
   | { name: 'admin-approvals' }
   | { name: 'admin-communities' }
   | { name: 'admin-messages'; conversationId?: string }
   | { name: 'admin-settings' }
-
-/** Live socket.io connection state — drives the honest footer indicator. */
-export type RealtimeStatus = 'connecting' | 'online' | 'offline'
 
 interface AppState {
   user: SessionUser | null
   sessionLoading: boolean
   unreadNotifications: number
   unreadMessages: number
-  realtimeStatus: RealtimeStatus
   view: View
   history: View[]
   sidebarOpen: boolean
@@ -38,7 +40,6 @@ interface AppState {
   setSessionLoading: (loading: boolean) => void
   setUnreadNotifications: (n: number) => void
   setUnreadMessages: (n: number) => void
-  setRealtimeStatus: (status: RealtimeStatus) => void
   incrementUnreadNotifications: () => void
   navigate: (view: View) => void
   back: () => void
@@ -51,7 +52,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessionLoading: true,
   unreadNotifications: 0,
   unreadMessages: 0,
-  realtimeStatus: 'connecting',
   view: { name: 'feed' },
   history: [],
   sidebarOpen: false,
@@ -60,7 +60,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSessionLoading: (sessionLoading) => set({ sessionLoading }),
   setUnreadNotifications: (unreadNotifications) => set({ unreadNotifications }),
   setUnreadMessages: (unreadMessages) => set({ unreadMessages }),
-  setRealtimeStatus: (realtimeStatus) => set({ realtimeStatus }),
   incrementUnreadNotifications: () =>
     set({ unreadNotifications: get().unreadNotifications + 1 }),
 
@@ -88,7 +87,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       sessionLoading: false,
       unreadNotifications: 0,
       unreadMessages: 0,
-      realtimeStatus: 'connecting',
       view: { name: 'feed' },
       history: [],
       sidebarOpen: false,

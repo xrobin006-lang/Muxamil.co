@@ -26,7 +26,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { apiJson } from '@/lib/api-client'
+import { apiJson, clearSessionToken } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { formatFullDate } from '@/lib/format'
 import { UserAvatar } from '../components/user-avatar'
@@ -106,6 +106,7 @@ export default function SettingsView() {
     } catch {
       /* best effort — clear the local session regardless */
     } finally {
+      clearSessionToken()
       reset()
     }
   }
@@ -148,15 +149,13 @@ export default function SettingsView() {
       <Card className="rounded-2xl shadow-sm">
         <CardContent className="p-4 sm:p-6">
           <div className="flex items-center gap-4">
-            <UserAvatar name={user.fullName || 'Member'} url={user.avatarUrl} size="lg" />
+            <UserAvatar name={user.fullName} url={user.avatarUrl} size="lg" />
             <div className="min-w-0 flex-1">
               <p className="flex items-center gap-1.5 text-base font-semibold leading-tight" dir="auto">
-                <span className="truncate">{user.fullName || 'Member'}</span>
+                <span className="truncate">{user.fullName}</span>
                 {user.isVerified && <VerifiedBadge size={15} />}
               </p>
-              {user.username ? (
-                <p className="truncate text-sm text-muted-foreground">@{user.username}</p>
-              ) : null}
+              <p className="truncate text-sm text-muted-foreground">@{user.username}</p>
             </div>
             <Button variant="outline" onClick={() => navigate({ name: 'profile' })} className="shrink-0">
               <Pencil className="mr-2 h-4 w-4" aria-hidden="true" />

@@ -23,12 +23,11 @@ export async function getAdminJwt(): Promise<string | null> {
   const now = Date.now()
   if (cached && cached.expiresAt > now + 5 * 60 * 1000) return cached.token
 
-  // Credentials come exclusively from server env — never hardcoded, never client-visible.
   const email = process.env.ADMIN_BOOTSTRAP_EMAIL
   const password = process.env.ADMIN_BOOTSTRAP_PASSWORD
   if (!email || !password) {
-    console.error('[admin-auth] ADMIN_BOOTSTRAP_EMAIL / ADMIN_BOOTSTRAP_PASSWORD not configured')
-    return cached?.token ?? null
+    console.error('[admin-auth] ADMIN_BOOTSTRAP_EMAIL / ADMIN_BOOTSTRAP_PASSWORD not configured — privileged-field bridge disabled.')
+    return null
   }
 
   // Isolated throwaway client — the sign-in session must never leak into the
@@ -39,6 +38,14 @@ export async function getAdminJwt(): Promise<string | null> {
   const { data, error } = await client.auth.signInWithPassword({ email, password })
   if (error || !data?.session?.access_token) {
     console.error('[admin-auth] bootstrap sign-in failed:', error?.message)
+    // Most common cause: dotenv strips an unquoted # … comment from the
+    // password value in .env (e.g. Pass#123$ → "Pass"). Quote the value.
+    if (password && !/["']/.test(password) && /#$/.test(password)) {
+      console.error(
+        '[admin-auth] hint: ADMIN_BOOTSTRAP_PASSWORD ends in "#" — verify dotenv parsed it fully. ' +
+          'Wrap the value in double quotes in .env if it contains # or $.'
+      )
+    }
     // A stale token is better than nothing — the DB will reject it if truly expired.
     return cached?.token ?? null
   }

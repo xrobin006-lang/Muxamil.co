@@ -24,7 +24,6 @@ import {
   Download,
   FileText,
   Hand,
-  ImageOff,
   ImagePlus,
   Loader2,
   Mic,
@@ -352,10 +351,6 @@ function MessageBubble({
   isCurrentMatch?: boolean
 }) {
   const pending = message.id.startsWith(TEMP_PREFIX)
-  // Broken-image fallback: signed URLs can expire or the storage object can be
-  // gone (legacy rows) — swap the dead image for a small placeholder instead
-  // of a 404 image bubble.
-  const [imageFailed, setImageFailed] = useState(false)
 
   return (
     <div
@@ -380,7 +375,7 @@ function MessageBubble({
         {message.messageType === 'audio' && message.attachmentUrl && (
           <VoiceNotePlayer message={message} isOwn={isOwn} />
         )}
-        {message.messageType === 'image' && message.attachmentUrl && !imageFailed && (
+        {message.messageType === 'image' && message.attachmentUrl && (
           <a
             href={message.attachmentUrl}
             target="_blank"
@@ -393,20 +388,8 @@ function MessageBubble({
               alt={message.attachmentName || 'Attached image'}
               loading="lazy"
               className="max-h-72 max-w-xs rounded-xl object-cover"
-              onError={() => setImageFailed(true)}
             />
           </a>
-        )}
-        {message.messageType === 'image' && message.attachmentUrl && imageFailed && (
-          <span
-            className={cn(
-              'mb-1 flex items-center gap-1.5 rounded-xl p-2 text-xs',
-              isOwn ? 'bg-primary-foreground/15 text-primary-foreground' : 'bg-background/70 text-muted-foreground',
-            )}
-          >
-            <ImageOff className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            Attachment unavailable
-          </span>
         )}
         {message.messageType === 'file' && message.attachmentUrl && (
           <a

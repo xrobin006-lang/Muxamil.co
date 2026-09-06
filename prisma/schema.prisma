@@ -1,0 +1,235 @@
+// CommHub - Community Platform Schema
+// WhatsApp-style community: admin posts, admin<->user private chat,
+// verified (blue tick) user communities with post approval workflow.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  username     String    @unique
+  avatarUrl    String?
+  bio          String    @default("")
+  role         String    @default("user") // "admin" | "user"
+  isVerified   Boolean   @default(false)
+  isBlocked    Boolean   @default(false)
+  blockedAt    DateTime?
+  blockedReason String?
+  // Timestamp of the last password change (set on signup + password change).
+  // Lets the Security card surface "Last changed 3 days ago" instead of "unknown".
+  passwordChangedAt DateTime @default(now())
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  posts                Post[]
+  community            Community?
+  communityPosts       CommunityPost[]
+  sentMessages         Message[]         @relation("SentMessages")
+  conversation         Conversation?
+  notifications        Notification[]
+  reportsFiled         Report[]          @relation("Reporter")
+  reportReviews        Report[]          @relation("ReportReviewer")
+  auditLogs            AuditLog[]
+  reviewActions        CommunityPost[]   @relation("Reviewer")
+  messageReactions     MessageReaction[]
+
+  @@index([role])
+  @@index([isVerified])
+  @@index([isBlocked])
+  @@index([createdAt])
+}
+
+// Official admin posts (the platform feed)
+model Post {
+  id         String    @id @default(cuid())
+  authorId   String
+  content    String    @default("")
+  linkUrl    String?
+  status     String    @default("published") // "published" | "draft" | "deleted"
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  author      User             @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  attachments PostAttachment[]
+
+  @@index([createdAt])
+  @@index([authorId])
+  @@index([status, createdAt])
+}
+
+// Scalable attachments for posts (image/video/audio/pdf/link)
+model PostAttachment {
+  id              String   @id @default(cuid())
+  postId          String?
+  communityPostId String?
+  fileType        String   // "image" | "video" | "audio" | "pdf" | "link"
+  fileName        String
+  storagePath     String   // url path served by /api/files/...
+  mimeType        String
+  fileSize        Int      @default(0)
+  linkUrl         String?
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  post          Post?          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  communityPost CommunityPost? @relation(fields: [communityPostId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@index([communityPostId])
+}
+
+// One personal community per verified user (ownerId unique)
+model Community {
+  id          String   @id @default(cuid())
+  ownerId     String   @unique
+  name        String
+  description String   @default("")
+  avatarUrl   String?
+  coverUrl    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner  User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  posts  CommunityPost[]
+
+  @@index([ownerId])
+  @@index([isActive])
+}
+
+// Community posts requiring admin approval
+model CommunityPost {
+  id              String    @id @default(cuid())
+  communityId     String
+  authorId        String
+  content         String    @default("")
+  status          String    @default("pending") // "pending" | "approved" | "rejected"
+  rejectionReason String?
+  reviewedAt      DateTime?
+  reviewedBy      String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  community   Community       @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  author      User            @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  reviewer    User?           @relation("Reviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  attachments PostAttachment[]
+
+  @@index([communityId, status, createdAt])
+  @@index([authorId])
+  @@index([status])
+}
+
+// One conversation per user with the admin team
+model Conversation {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  lastMessageAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([lastMessageAt])
+}
+
+model Message {
+  id             String    @id @default(cuid())
+  conversationId String
+  senderId       String
+  content        String    @default("")
+  messageType    String    @default("text") // "text" | "image" | "file"
+  attachmentUrl  String?
+  attachmentName String?
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  conversation Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User               @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  reactions    MessageReaction[]
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+  @@index([readAt])
+}
+
+// WhatsApp-style emoji reactions on chat messages (one per user per message)
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String   // "👍" | "❤️" | "😂" | "😮" | "😢" | "🙏"
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // "admin_message" | "user_message" | "verified" | "unverified" | "post_approved" | "post_rejected" | "new_post" | "blocked" | "unblocked" | "system"
+  title     String
+  message   String
+  relatedId String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@index([createdAt])
+}
+
+model Report {
+  id          String    @id @default(cuid())
+  reporterId  String
+  targetType  String    // "post" | "community_post" | "user" | "message"
+  targetId    String
+  reason      String
+  details     String    @default("")
+  status      String    @default("pending") // "pending" | "resolved" | "dismissed"
+  reviewedAt  DateTime?
+  reviewedBy  String?
+  createdAt   DateTime  @default(now())
+
+  reporter User  @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reviewer User? @relation("ReportReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+}
+
+model PlatformSetting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+
+  @@index([key])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  action     String   // e.g. "user.verified", "post.approved", "user.blocked"
+  targetType String
+  targetId   String
+  metadata   String   @default("{}") // JSON
+  createdAt  DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([actorId])
+}

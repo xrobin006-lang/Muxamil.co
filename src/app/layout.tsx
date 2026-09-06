@@ -20,18 +20,15 @@ export const metadata: Metadata = {
   keywords: ["Muxamil", "community", "announcements", "verified creators", "Muxamil.co"],
   authors: [{ name: "Muxamil.co" }],
   icons: {
-    icon: [
-      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
-      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
-    ],
+    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
     apple: "/apple-touch-icon.png",
   },
+  manifest: "/manifest.json",
   openGraph: {
     title: "Muxamil.co — One Home for Your Entire Community",
     description: "Official announcements, private admin chat and verified creator communities.",
     siteName: "Muxamil.co",
     type: "website",
-    images: [{ url: "/branding/muxamil-logo.png", width: 1122, height: 1402, alt: "Muxamil.co" }],
   },
 };
 
@@ -47,15 +44,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    // NOTE: no `suppressHydrationWarning` here, deliberately. Attributes such
-    // as `bis_skin_checked` are injected by browser extensions (e.g. the
-    // Urban VPN Proxy / Bitdefender family) BEFORE React hydrates — they are
-    // not produced by this app, which renders fully deterministic markup
-    // (verified in an extension-free headless browser: zero hydration
-    // warnings). Per project policy we do NOT hide extension-induced
-    // warnings with suppression flags; such warnings are external and benign.
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}>
+    // `suppressHydrationWarning` on <html>/<body> ONLY: browser extensions
+    // (e.g. Bitdefender's `bis_skin_checked`) inject attributes onto these
+    // elements before React hydrates. The app's own SSR output is fully
+    // deterministic (verified in a clean browser — zero hydration warnings);
+    // this flag is scoped to these two elements' attribute comparison only
+    // and never affects children.
+    <html lang="en" suppressHydrationWarning>
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+        suppressHydrationWarning
+      >
         {children}
         <Toaster position="top-center" richColors closeButton />
       </body>

@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
-import { formatFullDate } from '@/lib/format'
+import { formatCount, formatFullDate } from '@/lib/format'
 import { UserAvatar } from '../../components/user-avatar'
 import { VerifiedBadge } from '../../components/verified-badge'
 import { StatusBadge } from '../../components/status-badge'
@@ -209,15 +209,13 @@ export default function AdminCommunities() {
                 onClick={() => navigate({ name: 'user', userId: community.owner.id })}
                 className="mx-4 mt-3 flex items-center gap-2.5 rounded-xl border bg-muted/30 p-2.5 text-left transition-colors hover:border-primary/30 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:mx-5"
               >
-                <UserAvatar name={community.owner.fullName || 'Member'} url={community.owner.avatarUrl} size="sm" />
+                <UserAvatar name={community.owner.fullName} url={community.owner.avatarUrl} size="sm" />
                 <div className="min-w-0 flex-1">
                   <p className="flex items-center gap-1 text-xs font-semibold leading-tight" dir="auto">
-                    <span className="truncate">{community.owner.fullName || 'Member'}</span>
+                    <span className="truncate">{community.owner.fullName}</span>
                     {community.owner.isVerified && <VerifiedBadge size={13} />}
                   </p>
-                  {community.owner.username ? (
-                    <p className="truncate text-[11px] text-muted-foreground">@{community.owner.username}</p>
-                  ) : null}
+                  <p className="truncate text-[11px] text-muted-foreground">@{community.owner.username}</p>
                 </div>
                 <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">Owner</span>
               </button>

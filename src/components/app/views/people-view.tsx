@@ -2,18 +2,22 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { CalendarDays, Loader2, RefreshCw, Search, SearchX, ShieldCheck, Users } from 'lucide-react'
+import { BadgeCheck, CalendarDays, Loader2, RefreshCw, Search, SearchX, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
-import { formatFullDate } from '@/lib/format'
+import { formatFullDate, formatCount } from '@/lib/format'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
 import { EmptyState } from '../components/empty-state'
 
+/** GET /api/users → verified, active members only (contract §14).
+ *  Field names live-verified: id, fullName, username, avatarUrl, bio, role,
+ *  isVerified, createdAt (+ pagination envelope). No community / follower
+ *  counts are included in this list response — none are shown. */
 type PersonDTO = {
   id: string
   fullName: string
@@ -78,7 +82,7 @@ export default function PeopleView() {
       setPages(data.pages)
     } catch (err) {
       setLoadFailed(true)
-      toast.error(err instanceof Error ? err.message : 'Could not load people.')
+      toast.error(err instanceof Error ? err.message : 'Could not load members.')
     } finally {
       setLoading(false)
     }
@@ -99,7 +103,7 @@ export default function PeopleView() {
       setPage(data.page)
       setPages(data.pages)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not load more people.')
+      toast.error(err instanceof Error ? err.message : 'Could not load more members.')
     } finally {
       setLoadingMore(false)
     }
@@ -109,6 +113,15 @@ export default function PeopleView() {
 
   return (
     <div className="space-y-4">
+      {/* Directory heading — verified members only */}
+      <div className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5">
+        <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+          <BadgeCheck className="h-5 w-5 shrink-0 text-sky-500" aria-hidden="true" />
+          Verified Members
+        </h2>
+        <p className="mt-0.5 text-sm text-muted-foreground">Blue-tick members of Muxamil.co</p>
+      </div>
+
       {/* Search bar */}
       <div className="rounded-2xl border bg-card p-4 shadow-sm">
         <div className="relative">
@@ -119,9 +132,9 @@ export default function PeopleView() {
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people by name or @username…"
+            placeholder="Search verified members by name or @username…"
             className="pl-9"
-            aria-label="Search people"
+            aria-label="Search verified members"
             inputMode="search"
             autoComplete="off"
           />
@@ -132,17 +145,17 @@ export default function PeopleView() {
             />
           )}
         </div>
-        {!loading && !searching && (
+        {!loading && !searching && !loadFailed && (
           <p className="mt-2.5 text-xs text-muted-foreground" aria-live="polite">
             {debouncedQuery
-              ? `${total} result${total === 1 ? '' : 's'} for “${debouncedQuery}”`
-              : `${total} member${total === 1 ? '' : 's'} on Muxamil.co`}
+              ? `${formatCount(total)} result${total === 1 ? '' : 's'} for “${debouncedQuery}”`
+              : `${formatCount(total)} verified member${total === 1 ? '' : 's'} on Muxamil.co`}
           </p>
         )}
       </div>
 
       {loading ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="Loading people">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="Loading verified members">
           {[0, 1, 2, 3, 4, 5].map((i) => (
             <div key={i} className="rounded-2xl border bg-card p-4 shadow-sm">
               <div className="flex items-center gap-3">
@@ -162,8 +175,8 @@ export default function PeopleView() {
         <div className="rounded-2xl border bg-card shadow-sm">
           <EmptyState
             icon={RefreshCw}
-            title="People couldn't be loaded"
-            description="Something went wrong while fetching members. Please try again."
+            title="Members couldn't be loaded"
+            description="Something went wrong while fetching the directory. Please try again."
             action={
               <Button variant="outline" onClick={() => loadPeople(debouncedQuery)}>
                 Try again
@@ -173,12 +186,12 @@ export default function PeopleView() {
         </div>
       ) : people.length === 0 ? (
         <EmptyState
-          icon={debouncedQuery ? SearchX : Users}
-          title={debouncedQuery ? 'No results found' : 'No members yet'}
+          icon={debouncedQuery ? SearchX : BadgeCheck}
+          title={debouncedQuery ? 'No results found' : 'No verified members yet'}
           description={
             debouncedQuery
-              ? `No one matches “${debouncedQuery}”. Try a different name or username.`
-              : 'As people join Muxamil.co they will show up here.'
+              ? `No verified members match “${debouncedQuery}”. Try a different name or username.`
+              : 'Verified members of Muxamil.co will appear here.'
           }
           action={
             debouncedQuery ? (
@@ -205,7 +218,7 @@ export default function PeopleView() {
                   >
                     <div className="flex items-start gap-3">
                       <div className="relative shrink-0">
-                        <UserAvatar name={person.fullName || 'Member'} url={person.avatarUrl} size="lg" />
+                        <UserAvatar name={person.fullName} url={person.avatarUrl} size="lg" />
                         {isOnline && (
                           <span
                             className="presence-dot absolute bottom-0.5 right-0.5 h-3.5 w-3.5 rounded-full border-2 border-card bg-emerald-500"
@@ -216,16 +229,16 @@ export default function PeopleView() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5" dir="auto">
-                          <span className="truncate text-sm font-semibold leading-tight">{person.fullName || 'Member'}</span>
+                          <span className="truncate text-sm font-semibold leading-tight">{person.fullName}</span>
                           {person.role === 'admin' ? (
                             <AdminChip />
                           ) : person.isVerified ? (
                             <VerifiedBadge size={15} />
                           ) : null}
                         </div>
-                        {person.username ? (
+                        {person.username && (
                           <p className="truncate text-xs text-muted-foreground">@{person.username}</p>
-                        ) : null}
+                        )}
                       </div>
                     </div>
                     {person.bio ? (
@@ -249,7 +262,7 @@ export default function PeopleView() {
             <div className="flex justify-center pt-2">
               <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
                 {loadingMore && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {loadingMore ? 'Loading…' : 'Load more people'}
+                {loadingMore ? 'Loading…' : 'Load more members'}
               </Button>
             </div>
           )}

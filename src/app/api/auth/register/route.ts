@@ -81,7 +81,9 @@ export async function POST(req: NextRequest) {
       message: `Welcome to ${settings.site_name}, ${fullName}! Explore official posts, join the conversation, and say hello to the team.`,
     })
 
-    await setSessionCookie(created.id)
-    return ok({ user: toAppUser(profile) satisfies SessionUser })
+    // Same dual transport as login: cookie + echoed token (Bearer fallback
+    // for iframe preview contexts). Identical server-side verification.
+    const sessionToken = await setSessionCookie(created.id)
+    return ok({ user: toAppUser(profile) satisfies SessionUser, sessionToken })
   })
 }

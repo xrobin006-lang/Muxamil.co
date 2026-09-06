@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import { io, type Socket } from 'socket.io-client'
+import { getSessionToken } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
 import type { SessionUser } from '@/lib/types'
@@ -47,18 +48,6 @@ export function getSocket(): Socket | null {
 }
 
 /**
- * Realtime is OPTIONAL. Set NEXT_PUBLIC_REALTIME_URL to the socket.io endpoint
- * to enable live updates, e.g.:
- *   - "/"            → same origin (realtime service reverse-proxied at the
- *                      same domain, socket.io path "/")
- *   - "https://rt.example.com" → dedicated realtime service host
- * Leave it empty/undefined for REST-only mode — the app is fully functional
- * without realtime (REST APIs are the source of truth; the indicator shows
- * "offline" and presence stays empty).
- */
-const REALTIME_URL = process.env.NEXT_PUBLIC_REALTIME_URL ?? ''
-
-/**
  * Global realtime connection (cookie-authenticated, same-origin through the
  * gateway). Keeps header badges (notifications / unread messages) live, feeds
  * the presence store, and gives views a shared socket via useSocketEvent.
@@ -66,7 +55,6 @@ const REALTIME_URL = process.env.NEXT_PUBLIC_REALTIME_URL ?? ''
 export function useRealtime(user: SessionUser | null) {
   const incrementUnreadNotifications = useAppStore((s) => s.incrementUnreadNotifications)
   const setUnreadMessages = useAppStore((s) => s.setUnreadMessages)
-  const setRealtimeStatus = useAppStore((s) => s.setRealtimeStatus)
   const unreadMessages = useAppStore((s) => s.unreadMessages)
   const unreadRef = useRef(unreadMessages)
   // Latest user for handlers, WITHOUT re-running the connection effect on
@@ -86,22 +74,20 @@ export function useRealtime(user: SessionUser | null) {
   useEffect(() => {
     if (!userId) return
 
-    // REST-only mode when no realtime endpoint is configured.
-    if (!REALTIME_URL) {
-      setRealtimeStatus('offline')
-      return
-    }
-
     refCount += 1
     if (!socket) {
-      setRealtimeStatus('connecting')
-      socket = io(REALTIME_URL, {
+      // Bearer fallback for iframe preview contexts where the session cookie
+      // is blocked — the socket handshake carries the same signed JWT via the
+      // `auth` payload and the service verifies it with the same secret.
+      const token = getSessionToken()
+      socket = io('/?XTransformPort=3003', {
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: 10,
         reconnectionDelay: 1000,
         timeout: 10000,
         withCredentials: true,
+        ...(token ? { auth: { token } } : {}),
       })
       replayListeners(socket)
     }
@@ -136,39 +122,24 @@ export function useRealtime(user: SessionUser | null) {
     // If the socket was created by an earlier mount it may already be
     // connected — ask for a fresh presence snapshot when (re)connecting.
     const requestSnapshot = () => s.emit('presence:sync')
-    if (s.connected) {
-      setRealtimeStatus('online')
-      requestSnapshot()
-    }
+    if (s.connected) requestSnapshot()
     s.on('connect', requestSnapshot)
 
-    // Keep the honest footer indicator in sync with the real socket state.
-    const onStatusOnline = () => setRealtimeStatus('online')
-    const onStatusOffline = () => setRealtimeStatus('offline')
-    s.on('connect', onStatusOnline)
-    s.on('disconnect', onStatusOffline)
-    s.on('connect_error', onStatusOffline)
-
     return () => {
-      if (!REALTIME_URL) return
       s.off('notification:new', onNotification)
       s.off('message:new', onAdminMessage)
       s.off('presence:state', onPresenceState)
       s.off('presence:update', onPresenceUpdate)
       s.off('connect', requestSnapshot)
-      s.off('connect', onStatusOnline)
-      s.off('disconnect', onStatusOffline)
-      s.off('connect_error', onStatusOffline)
       refCount -= 1
       if (refCount <= 0) {
-        setRealtimeStatus('offline')
         s.close()
         socket = null
         refCount = 0
         usePresenceStore.getState().reset()
       }
     }
-  }, [userId, incrementUnreadNotifications, setUnreadMessages, setRealtimeStatus])
+  }, [userId, incrementUnreadNotifications, setUnreadMessages])
 
   return socket
 }

@@ -1,22 +1,23 @@
 import { createClient } from '@supabase/supabase-js'
 
+/** Fail fast with a clear message when a required env var is missing. */
+export function requireEnv(name: string): string {
+  const v = process.env[name]
+  if (!v) {
+    throw new Error(
+      `[config] Missing environment variable ${name}. Copy .env.example to .env and fill in your values.`
+    )
+  }
+  return v
+}
+
 /**
  * Supabase is the PRIMARY datastore of CommHub (Muxamil.co production data).
  * All access happens server-side with the secret (service-role) key, which
  * bypasses RLS. NEVER import this module from client components.
- *
- * Configuration comes exclusively from environment variables — no secrets are
- * ever hardcoded here. See .env.example for the required variables.
  */
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
-const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY
-
-if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
-  throw new Error(
-    'Supabase is not configured. Copy .env.example to .env.local and set ' +
-      'NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY (see README.md → Environment Variables).'
-  )
-}
+const SUPABASE_URL = requireEnv('NEXT_PUBLIC_SUPABASE_URL')
+const SUPABASE_SECRET_KEY = requireEnv('SUPABASE_SECRET_KEY')
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -27,6 +28,7 @@ export const SUPABASE_URL_RESOLVED = SUPABASE_URL
 /** Storage buckets of the Muxamil.co platform (existing conventions). */
 export const BUCKETS = {
   avatar: 'mux-avatars', // public:  profiles/{userId}/{ts}-{rand}-{name}
+  banner: 'mux-banners', // public:  profiles/{userId}/{ts}-{rand}-{name}
   postImage: 'mux-post-images', // public
   postVideo: 'mux-post-videos', // public
   postDocument: 'mux-post-documents', // public
@@ -98,6 +100,7 @@ export type MuxProfileRow = {
   email: string
   full_name: string
   avatar_url: string | null
+  banner_url: string | null
   role: 'admin' | 'user'
   status: 'active' | 'blocked' | string
   username: string | null
@@ -108,8 +111,6 @@ export type MuxProfileRow = {
   created_at: string
   updated_at: string
   last_active_at: string | null
-  /** Extended profile imagery config (jsonb) — currently holds `banner_url`. */
-  avatar_config?: Record<string, unknown> | null
 }
 
 /** Application-level user consumed by routes (camelCase, app semantics). */
@@ -127,24 +128,6 @@ export type AppUser = {
   createdAt: string
 }
 
-/** Read the profile banner URL from the avatar_config jsonb column. */
-export function bannerUrlOf(p: Pick<MuxProfileRow, 'avatar_config'>): string | null {
-  const raw = (p.avatar_config as { banner_url?: unknown } | null | undefined)?.banner_url
-  return typeof raw === 'string' && raw.length > 0 ? raw : null
-}
-
-/** Build the avatar_config jsonb value that persists the given banner URL,
- *  preserving any other keys already stored in the column. */
-export function avatarConfigWithBanner(
-  existing: Record<string, unknown> | null | undefined,
-  bannerUrl: string | null
-): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...(existing ?? {}) }
-  if (bannerUrl) next.banner_url = bannerUrl
-  else delete next.banner_url
-  return next
-}
-
 export function toAppUser(p: MuxProfileRow): AppUser {
   return {
     id: p.id,
@@ -152,7 +135,7 @@ export function toAppUser(p: MuxProfileRow): AppUser {
     fullName: p.full_name || '',
     username: p.username || '',
     avatarUrl: p.avatar_url,
-    bannerUrl: bannerUrlOf(p),
+    bannerUrl: p.banner_url ?? null,
     bio: p.bio || '',
     role: p.role === 'admin' ? 'admin' : 'user',
     isVerified: !!p.is_verified,

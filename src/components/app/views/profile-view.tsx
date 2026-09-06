@@ -6,12 +6,14 @@ import {
   BadgeCheck,
   CalendarDays,
   Camera,
-  Image as ImageIcon,
+  ImageIcon,
   Loader2,
   Pencil,
   Plus,
   ShieldCheck,
+  Trash2,
   User as UserIcon,
+  UserCheck,
   UsersRound,
   XCircle,
 } from 'lucide-react'
@@ -40,37 +42,16 @@ type ProfilePatchResponse = {
   user: SessionUser
 }
 
+/** GET /api/users/[own id] → real follow stats for the signed-in member
+ *  (fields live inside `user`, live-verified). Silent fail → chips omitted. */
+type OwnFollowStats = {
+  user: { followersCount?: number; followingCount?: number }
+}
+
 const AVATAR_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
-const BANNER_ACCEPT = 'image/jpeg,image/png,image/webp'
+const BANNER_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 const USERNAME_RE = /^[a-zA-Z0-9_.]+$/
 const BIO_MAX = 280
-
-/** Shared banner surface: uploaded image when present, brand gradient otherwise. */
-function ProfileBanner({ url, className }: { url: string | null; className?: string }) {
-  if (url) {
-    return (
-      <div className={`relative ${className ?? ''}`}>
-        <img
-          src={url}
-          alt="Profile banner"
-          className="h-full w-full object-cover"
-          loading="lazy"
-        />
-        {/* Soft bottom fade so the overlapping avatar always reads cleanly. */}
-        <div
-          className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-card/60 to-transparent"
-          aria-hidden="true"
-        />
-      </div>
-    )
-  }
-  return (
-    <div
-      className={`bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 ${className ?? ''}`}
-      aria-hidden="true"
-    />
-  )
-}
 
 function Chip({
   icon: Icon,
@@ -121,6 +102,29 @@ export default function ProfileView() {
   const [communityLoading, setCommunityLoading] = useState(user.isVerified)
   const [communityFailed, setCommunityFailed] = useState(false)
   const [communityReload, setCommunityReload] = useState(0)
+
+  // ---- Follow stats (one extra call, best-effort) ------------------------
+  const [followStats, setFollowStats] = useState<{ followersCount: number; followingCount: number } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    apiGet<OwnFollowStats>(`/api/users/${encodeURIComponent(user.id)}`)
+      .then((data) => {
+        if (
+          !cancelled &&
+          typeof data.user.followersCount === 'number' &&
+          typeof data.user.followingCount === 'number'
+        ) {
+          setFollowStats({ followersCount: data.user.followersCount, followingCount: data.user.followingCount })
+        }
+      })
+      .catch(() => {
+        /* stats are optional decoration — omit silently */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [user.id])
 
   useEffect(() => {
     if (!user.isVerified) return
@@ -178,7 +182,7 @@ export default function ProfileView() {
   const handleBannerFile = async (file: File) => {
     if (bannerUploading) return
     if (!file.type.startsWith('image/')) {
-      toast.error('Please choose an image file for the banner.')
+      toast.error('Please choose an image file for your banner.')
       return
     }
     setBannerUploading(true)
@@ -205,7 +209,7 @@ export default function ProfileView() {
   }
 
   const saveProfile = async () => {
-    if (saving || avatarUploading) return
+    if (saving || avatarUploading || bannerUploading) return
     const problem = validate()
     if (problem) {
       toast.error(problem)
@@ -241,9 +245,32 @@ export default function ProfileView() {
         <div className="mt-6 space-y-5">
           {/* Banner */}
           <div className="space-y-2">
-            <Label>Profile banner</Label>
-            <div className="overflow-hidden rounded-xl border">
-              <ProfileBanner url={bannerUrl} className="h-24 w-full sm:h-28" />
+            <div className="flex items-center justify-between">
+              <Label>Profile banner</Label>
+              <span className="text-xs text-muted-foreground">Optional · shown at the top of your profile</span>
+            </div>
+            <div className="group relative overflow-hidden rounded-xl border bg-muted/40">
+              {bannerUrl ? (
+                <img
+                  src={bannerUrl}
+                  alt="Profile banner preview"
+                  className="h-32 w-full object-cover sm:h-40"
+                />
+              ) : (
+                <div className="flex h-32 w-full flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-emerald-500/25 via-teal-600/25 to-green-700/25 text-muted-foreground sm:h-40">
+                  <ImageIcon className="h-7 w-7" aria-hidden="true" />
+                  <p className="text-xs font-medium">No banner yet</p>
+                </div>
+              )}
+              {bannerUploading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[2px]">
+                  <div className="w-48 space-y-2 text-center">
+                    <Loader2 className="mx-auto h-5 w-5 animate-spin" aria-hidden="true" />
+                    <Progress value={bannerProgress} className="h-1.5" aria-label="Uploading banner" />
+                    <p className="text-xs text-muted-foreground">Uploading banner…</p>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               <Button
@@ -261,18 +288,21 @@ export default function ProfileView() {
                 {bannerUrl ? 'Change banner' : 'Upload banner'}
               </Button>
               {bannerUrl && !bannerUploading && (
-                <Button type="button" variant="ghost" size="sm" onClick={() => setBannerUrl(null)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setBannerUrl(null)}
+                  className="text-destructive hover:text-destructive"
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
                   Remove
                 </Button>
               )}
             </div>
-            {bannerUploading ? (
-              <Progress value={bannerProgress} className="h-1.5 w-full max-w-sm" aria-label="Uploading banner" />
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Wide image works best (recommended 1500×500) · JPG, PNG or WebP · up to 8 MB
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground">
+              JPG, PNG, WebP or GIF · up to 8 MB · wide images work best (1500×500)
+            </p>
           </div>
           <input
             ref={bannerInputRef}
@@ -290,7 +320,7 @@ export default function ProfileView() {
 
           {/* Avatar */}
           <div className="flex items-center gap-4">
-            <UserAvatar name={fullName.trim() || user.fullName || 'Member'} url={avatarUrl} size="lg" />
+            <UserAvatar name={fullName.trim() || user.fullName} url={avatarUrl} size="lg" />
             <div className="space-y-2">
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -410,16 +440,22 @@ export default function ProfileView() {
     <div className="space-y-4">
       {/* Header */}
       <section className="overflow-hidden rounded-2xl border bg-card shadow-sm">
-        <ProfileBanner url={user.bannerUrl} className="h-28 sm:h-36" />
+        {user.bannerUrl ? (
+          <img
+            src={user.bannerUrl}
+            alt={`${user.fullName}'s profile banner`}
+            className="h-28 w-full object-cover sm:h-36"
+          />
+        ) : (
+          <div
+            className="h-28 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-36"
+            aria-hidden="true"
+          />
+        )}
         <div className="px-4 pb-5 sm:px-6">
           <div className="-mt-12 flex flex-wrap items-end justify-between gap-3 sm:-mt-14">
             <div className="relative">
-              <UserAvatar
-                name={user.fullName || 'Member'}
-                url={user.avatarUrl}
-                size="xl"
-                className="ring-4 ring-card"
-              />
+              <UserAvatar name={user.fullName} url={user.avatarUrl} size="xl" className="ring-4 ring-card" />
               <button
                 type="button"
                 onClick={startEditing}
@@ -438,7 +474,7 @@ export default function ProfileView() {
 
           <div className="mt-3">
             <h2 className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xl font-bold tracking-tight sm:text-2xl" dir="auto">
-              <span>{user.fullName || 'Member'}</span>
+              <span>{user.fullName}</span>
               {user.isVerified && <VerifiedBadge size={19} />}
               {user.role === 'admin' && (
                 <Chip icon={ShieldCheck} tone="amber">
@@ -446,7 +482,7 @@ export default function ProfileView() {
                 </Chip>
               )}
             </h2>
-            {user.username && <p className="mt-0.5 text-sm text-muted-foreground">@{user.username}</p>}
+            <p className="mt-0.5 text-sm text-muted-foreground">@{user.username}</p>
 
             {user.bio && (
               <p className="mt-3 whitespace-pre-wrap break-words text-[15px] leading-relaxed" dir="auto">
@@ -463,6 +499,12 @@ export default function ProfileView() {
                 <Chip icon={XCircle}>Not verified</Chip>
               )}
               <Chip icon={CalendarDays}>Member since {formatFullDate(user.createdAt)}</Chip>
+              {followStats && (
+                <Chip icon={UsersRound}>
+                  {followStats.followersCount} Follower{followStats.followersCount === 1 ? '' : 's'}
+                </Chip>
+              )}
+              {followStats && <Chip icon={UserCheck}>{followStats.followingCount} Following</Chip>}
               <Chip icon={user.role === 'admin' ? ShieldCheck : UserIcon}>
                 {user.role === 'admin' ? 'Administrator' : 'Member'}
               </Chip>
