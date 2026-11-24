@@ -13,3 +13,10 @@ mini-services/realtime-service/.env
 mini-services/realtime-service/.env
 
 mini-services/realtime-service/.env
+
+# Local database and uploaded user files
+/db/*.db
+/db/*.db-*
+/db/*.sqlite
+/db/*.sqlite3
+/upload/
