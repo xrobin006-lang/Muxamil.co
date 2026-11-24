@@ -38,14 +38,6 @@ export async function getAdminJwt(): Promise<string | null> {
   const { data, error } = await client.auth.signInWithPassword({ email, password })
   if (error || !data?.session?.access_token) {
     console.error('[admin-auth] bootstrap sign-in failed:', error?.message)
-    // Most common cause: dotenv strips an unquoted # … comment from the
-    // password value in .env (e.g. Pass#123$ → "Pass"). Quote the value.
-    if (password && !/["']/.test(password) && /#$/.test(password)) {
-      console.error(
-        '[admin-auth] hint: ADMIN_BOOTSTRAP_PASSWORD ends in "#" — verify dotenv parsed it fully. ' +
-          'Wrap the value in double quotes in .env if it contains # or $.'
-      )
-    }
     // A stale token is better than nothing — the DB will reject it if truly expired.
     return cached?.token ?? null
   }

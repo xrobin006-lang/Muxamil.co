@@ -8,60 +8,22 @@ export class ApiError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Session token fallback (Authorization: Bearer)
-//
-// The preview panel embeds this app in a cross-site iframe, where browsers
-// block the session cookie (the root cause of the recurring admin
-// "permission" / "statistics unavailable" failures). The login/register
-// responses echo the SAME signed session JWT that is set as the httpOnly
-// cookie; when the cookie is blocked we send it as a Bearer header instead.
-// Server-side verification is IDENTICAL for both transports — this changes
-// the transport only, never the authorization logic.
-// ---------------------------------------------------------------------------
-
-const TOKEN_KEY = 'commhub_token'
-
-function localStorageAvailable(): boolean {
-  try {
-    return typeof window !== 'undefined' && !!window.localStorage
-  } catch {
-    return false
-  }
+/** Double-submit CSRF headers. src/proxy.ts issues a non-HttpOnly
+ * `commhub_csrf` cookie and requires every mutating request that carries it
+ * to echo the value back in the `X-CSRF-Token` header — a cross-site page
+ * cannot read the cookie, so it can never forge the header. Attached by
+ * apiJson/apiUpload and by the raw multipart upload call sites. */
+export function csrfHeaders(): Record<string, string> {
+  if (typeof document === 'undefined') return {}
+  const m = document.cookie.match(/(?:^|;\s*)commhub_csrf=([^;]+)/)
+  const token = m ? decodeURIComponent(m[1]) : ''
+  return token ? { 'X-CSRF-Token': token } : {}
 }
 
-export function setSessionToken(token: string): void {
-  if (!localStorageAvailable()) return
-  try {
-    window.localStorage.setItem(TOKEN_KEY, token)
-  } catch {
-    /* storage full / blocked — the cookie transport still applies */
-  }
-}
-
-export function clearSessionToken(): void {
-  if (!localStorageAvailable()) return
-  try {
-    window.localStorage.removeItem(TOKEN_KEY)
-  } catch {
-    /* ignore */
-  }
-}
-
-export function getSessionToken(): string | null {
-  if (!localStorageAvailable()) return null
-  try {
-    return window.localStorage.getItem(TOKEN_KEY)
-  } catch {
-    return null
-  }
-}
-
-/** Authorization header when a fallback token exists (cookie stays primary). */
-function authHeaders(): Record<string, string> {
-  const token = getSessionToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
-}
+/** Offline / DNS / connection-drop errors must never surface the browser's raw
+ *  TypeError ("Failed to fetch") in a toast — translate to a friendly message.
+ *  HTTP-level errors are already friendly via parse() below. */
+const NETWORK_ERROR = 'Network error — please check your connection and try again.'
 
 async function parse<T>(res: Response): Promise<T> {
   const text = await res.text()
@@ -82,17 +44,27 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 export async function apiGet<T>(url: string): Promise<T> {
-  const res = await fetch(url, { credentials: 'same-origin', headers: authHeaders() })
+  let res: Response
+  try {
+    res = await fetch(url, { credentials: 'same-origin' })
+  } catch {
+    throw new ApiError(NETWORK_ERROR, 0)
+  }
   return parse<T>(res)
 }
 
 export async function apiJson<T>(url: string, method: 'POST' | 'PATCH' | 'PUT' | 'DELETE', body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  })
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    })
+  } catch {
+    throw new ApiError(NETWORK_ERROR, 0)
+  }
   return parse<T>(res)
 }
 
@@ -102,13 +74,12 @@ export function apiUpload(
   file: File,
   category: string,
   onProgress?: (pct: number) => void,
-): Promise<{ url: string; fileName: string; mimeType: string; fileSize: number; fileType: string }> {
+): Promise<{ url: string; path: string; fileName: string; mimeType: string; fileSize: number; fileType: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url)
     xhr.withCredentials = true
-    const bearer = getSessionToken()
-    if (bearer) xhr.setRequestHeader('Authorization', `Bearer ${bearer}`)
+    for (const [k, v] of Object.entries(csrfHeaders())) xhr.setRequestHeader(k, v)
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))

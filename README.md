@@ -124,6 +124,7 @@ them — the app fails fast with a clear error if a required variable is missing
 | `ADMIN_BOOTSTRAP_PASSWORD` | ➖ | …required only if you use verify/block admin actions |
 | `REALTIME_SERVICE_URL` | ➖ | Control API of the realtime sidecar (default `http://localhost:3004`) |
 | `INTERNAL_API_KEY` | ➖ | Shared secret Next.js ↔ realtime sidecar |
+| `NEXT_PUBLIC_SITE_URL` | ➖ | Canonical production origin for SEO/Open-Graph absolute URLs (default `https://muxamil.co`) |
 | `DATABASE_URL` | ➖ | Local SQLite file for dev tooling only (`file:./db/custom.db`) |
 
 **Never commit `.env`.** It is git-ignored by default.

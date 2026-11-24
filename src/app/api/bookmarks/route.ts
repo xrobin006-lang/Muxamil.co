@@ -41,12 +41,9 @@ export async function GET(req: NextRequest) {
       .order('sort_order', { referencedTable: 'mux_post_attachments', ascending: true })
     if (postsError) throw new Error(postsError.message)
 
-    // AI activity fields are admin-only (spec §11) — members get zeros.
-    const posts = await decoratePosts(
-      (postsRaw ?? []) as unknown as PostRowFull[],
-      user.id,
-      user.role === 'admin'
-    )
+    const posts = await decoratePosts((postsRaw ?? []) as unknown as PostRowFull[], user.id, {
+      includeReal: user.role === 'admin',
+    })
 
     // 3) stitch savedAt + preserve the bookmark order
     const savedAtByPost = new Map(rows.map((r) => [r.post_id, r.created_at]))

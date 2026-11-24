@@ -1,19 +1,18 @@
-import { NextRequest, after } from 'next/server'
+import { NextRequest } from 'next/server'
 import { supabase, freshId, nowIso, storagePathFromUrl } from '@/lib/supabase'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser, requireAdmin } from '@/lib/auth'
-import { auditLog, emitRealtime, notifyNewPost } from '@/lib/realtime'
-import { runAiEngagementForPost } from '@/lib/ai-automation'
-import { sanitizeLink } from '@/lib/validators'
+import { auditLog, emitRealtime } from '@/lib/realtime'
+import { z } from 'zod'
+import { sanitizeLink, attachmentSchema } from '@/lib/validators'
 import { POST_SELECT, decoratePosts, type PostRowFull } from '@/lib/post-dto'
 
 type PostCoreRow = {
   id: string
+  title: string | null
   status: string | null
   is_published: boolean | null
   published_at: string | null
-  slug: string | null
-  title: string | null
   views_real: number | null
   views_count: number | null
   view_count_adjustment: number | null
@@ -42,8 +41,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const isAdmin = user.role === 'admin'
     if (!row.is_published && !isAdmin) return errors.notFound('Post')
 
-    // AI activity fields are admin-only (spec §11) — members get zeros.
-    const [post] = await decoratePosts([row], user.id, isAdmin)
+    const [post] = await decoratePosts([row], user.id, { includeReal: isAdmin })
     return ok({ post })
   })
 }
@@ -94,7 +92,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const { data: existingRaw, error: findError } = await supabase
       .from('mux_posts')
       .select(
-        'id,status,is_published,published_at,slug,title,views_real,views_count,view_count_adjustment,' +
+        'id,status,is_published,published_at,views_real,views_count,view_count_adjustment,' +
           'likes_real,likes_count,like_count_adjustment'
       )
       .eq('id', id)
@@ -240,14 +238,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     // --- media attachments: replaced ONLY when explicitly passed ------------
     let mediaCountAfterReplace: number | null = null
     if (body.attachments !== undefined) {
-      if (!Array.isArray(body.attachments)) return fail('Attachments must be a list.')
-      const list = body.attachments as AttachmentInput[]
-      if (list.length > 12) return fail('A post can have at most 12 attachments.')
-      for (const a of list) {
-        if (!a || typeof a.url !== 'string' || typeof a.fileName !== 'string') {
-          return fail('One of the attachments is missing a file or name.')
-        }
+      // Same validation as the POST route (officialPostSchema): every
+      // attachment must be an http(s) upload descriptor — the UI renders
+      // these URLs as links, so anything else must be rejected.
+      const parsedAttachments = z.array(attachmentSchema).max(12).safeParse(body.attachments)
+      if (!parsedAttachments.success) {
+        return fail('One of the attachments is missing a file or name, or has an invalid URL.')
       }
+      const list = parsedAttachments.data
       const { error: delError } = await supabase
         .from('mux_post_attachments')
         .delete()
@@ -374,7 +372,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       .maybeSingle()
     if (afterError) throw new Error(afterError.message)
     if (!afterRaw) return errors.notFound('Post')
-    const [post] = await decoratePosts([afterRaw as unknown as PostRowFull], admin.id)
+    const [post] = await decoratePosts([afterRaw as unknown as PostRowFull], admin.id, { includeReal: true })
 
     if (changed.length > 0) {
       await emitRealtime({
@@ -389,34 +387,16 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         },
       })
     }
-
-    // Publish transition (draft/scheduled → published): the feed treats it
-    // as a new post AND the NEW_POST notification fan-out fires (spec §33).
-    // Idempotent uuidv5 ids mean republishing never duplicates notifications.
-    if (targetStatus === 'published' && existing.status !== 'published') {
-      await emitRealtime({ event: 'feed:new-post', room: 'all', payload: post })
-      try {
-        await notifyNewPost({
-          id,
-          title: existing.title || post.title,
-          slug: existing.slug,
-          actorId: admin.id,
-        })
-      } catch (err) {
-        console.error('[posts] new-post notification fan-out failed:', (err as Error).message)
-      }
-      // AI auto-engagement after the response (spec §37/§39).
-      after(() => {
-        runAiEngagementForPost(id).catch(() => {})
-      })
-    }
     return ok({ post })
   })
 }
 
 /**
  * Admin-only: UNPUBLISH an official post (never a hard delete — production
- * data is preserved and the post can be republished via PATCH).
+ * data is preserved and the post can be republished via PATCH; the permanent
+ * delete lives at /api/admin/posts/[id]). Unpublished posts leave every
+ * member surface: the feed query filters is_published=true (+ status not
+ * draft/scheduled) and single-post GET 404s for non-admins.
  */
 export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async (): Promise<Response> => {
@@ -424,19 +404,36 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
     if (!admin) return errors.forbidden()
 
     const { id } = await ctx.params
-    const { data: existing, error: findError } = await supabase
+    const { data: existingRaw, error: findError } = await supabase
       .from('mux_posts')
-      .select('id')
+      .select('id,title,status,is_published')
       .eq('id', id)
       .maybeSingle()
     if (findError) throw new Error(findError.message)
-    if (!existing) return errors.notFound('Post')
+    if (!existingRaw) return errors.notFound('Post')
+    const existing = existingRaw as unknown as {
+      id: string
+      title: string | null
+      status: string | null
+      is_published: boolean | null
+    }
 
     const { error: updateError } = await supabase
       .from('mux_posts')
       .update({ is_published: false, status: 'draft', updated_at: nowIso() })
       .eq('id', id)
     if (updateError) throw new Error(updateError.message)
+
+    await auditLog({
+      actorId: admin.id,
+      action: 'post.unpublished',
+      targetType: 'post',
+      targetId: id,
+      metadata: {
+        prev: { title: existing.title, status: existing.status, isPublished: !!existing.is_published },
+        next: { status: 'draft', isPublished: false },
+      },
+    })
 
     await emitRealtime({ event: 'feed:post-deleted', room: 'all', payload: { id } })
     return ok({ success: true })

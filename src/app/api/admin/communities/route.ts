@@ -25,7 +25,7 @@ type CommunityRow = {
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const q = (req.nextUrl.searchParams.get('q') || '')
       .replace(/[,()%\\]/g, ' ')

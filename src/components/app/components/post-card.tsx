@@ -21,7 +21,6 @@ import { UserAvatar } from './user-avatar'
 import { VerifiedBadge } from './verified-badge'
 import { MediaRenderer } from './media-renderer'
 import { StatusBadge } from './status-badge'
-import { AiActivitySection } from './ai-activity-section'
 import { timeAgo, formatCount } from '@/lib/format'
 import { apiJson } from '@/lib/api-client'
 import {
@@ -52,19 +51,10 @@ const POST_TYPE_LABELS: Record<string, string> = {
 
 /** Per-viewer engagement state the card owns optimistically. */
 type EngagementState = {
-  isSaved: boolean
-  aiCommentsCount: number
-  viewsCount: number
-  /** The viewer's LIKE state — DB-backed, never localStorage. */
   isLiked: boolean
-  /** Displayed like count (real likes + admin display override). */
   likesCount: number
-}
-
-/** Like toggle response from POST /api/posts/{id}/like. */
-type LikeResponse = {
-  liked: boolean
-  likesCount: number
+  isSaved: boolean
+  viewsCount: number
 }
 
 /** Rough threshold above which content is clamped behind "Show more". */
@@ -78,7 +68,6 @@ export function PostCard({
   onDelete,
   onAuthorClick,
   rejectionReason,
-  highlight = false,
   onChanged,
 }: {
   post: AnyPost
@@ -86,8 +75,6 @@ export function PostCard({
   onDelete?: (postId: string) => void
   onAuthorClick?: (authorId: string) => void
   rejectionReason?: string | null
-  /** Briefly rings the card (deep-link focus from the feed). */
-  highlight?: boolean
   /** Lets parents (feed, saved…) sync optimistic engagement changes into their state. */
   onChanged?: (patch: Partial<PostDTO>) => void
 }) {
@@ -97,7 +84,6 @@ export function PostCard({
   const [expanded, setExpanded] = useState(false)
   const [likeBusy, setLikeBusy] = useState(false)
   const [saveBusy, setSaveBusy] = useState(false)
-  const isAdmin = user?.role === 'admin'
 
   const isOfficial = 'author' in post
   const official = isOfficial ? (post as PostDTO) : null
@@ -108,39 +94,29 @@ export function PostCard({
 
   // ---- engagement state (official posts only) -----------------------------
   const [engagement, setEngagement] = useState<EngagementState>({
-    isSaved: official?.isSaved ?? false,
-    aiCommentsCount: official?.aiCommentsCount ?? 0,
-    viewsCount: official?.viewsCount ?? 0,
     isLiked: official?.isLiked ?? false,
     likesCount: official?.likesCount ?? 0,
+    isSaved: official?.isSaved ?? false,
+    viewsCount: official?.viewsCount ?? 0,
   })
 
   const officialId = official?.id
-  const propSaved = official?.isSaved
-  const propAiComments = official?.aiCommentsCount
-  const propViews = official?.viewsCount
   const propLiked = official?.isLiked
-  const propLikesCount = official?.likesCount
+  const propLikes = official?.likesCount
+  const propSaved = official?.isSaved
+  const propViews = official?.viewsCount
 
   // Re-sync from the server whenever the parent supplies a fresh post object
   // (refetch, realtime refresh, or a patch applied via onChanged).
   useEffect(() => {
     if (!officialId) return
     setEngagement({
-      isSaved: !!propSaved,
-      aiCommentsCount: propAiComments ?? 0,
-      viewsCount: propViews ?? 0,
       isLiked: !!propLiked,
-      likesCount: propLikesCount ?? 0,
+      likesCount: propLikes ?? 0,
+      isSaved: !!propSaved,
+      viewsCount: propViews ?? 0,
     })
-  }, [
-    officialId,
-    propSaved,
-    propAiComments,
-    propViews,
-    propLiked,
-    propLikesCount,
-  ])
+  }, [officialId, propLiked, propLikes, propSaved, propViews])
 
   const applyEngagement = useCallback(
     (patch: Partial<EngagementState>) => {
@@ -178,26 +154,24 @@ export function PostCard({
     }
   }
 
-  /**
-   * Toggle the viewer's LIKE. Optimistic heart + count, server response is
-   * the truth, full rollback + error toast on failure — DB-backed state that
-   * survives refresh and re-login (never localStorage).
-   */
   const toggleLike = async () => {
     if (!official || likeBusy) return
     const prev = { isLiked: engagement.isLiked, likesCount: engagement.likesCount }
-    const nextLiked = !prev.isLiked
+    const nextLiked = !engagement.isLiked
     applyEngagement({
       isLiked: nextLiked,
-      likesCount: Math.max(0, prev.likesCount + (nextLiked ? 1 : -1)),
+      likesCount: Math.max(0, engagement.likesCount + (nextLiked ? 1 : -1)),
     })
     setLikeBusy(true)
     try {
-      const res = await apiJson<LikeResponse>(`/api/posts/${official.id}/like`, 'POST')
+      const res = await apiJson<{ liked: boolean; likesCount: number }>(
+        `/api/posts/${official.id}/like`,
+        'POST',
+      )
       applyEngagement({ isLiked: res.liked, likesCount: res.likesCount })
     } catch (err) {
-      applyEngagement({ isLiked: prev.isLiked, likesCount: prev.likesCount })
-      toast.error(err instanceof Error ? err.message : 'Could not update your like.')
+      applyEngagement(prev) // revert the optimistic flip
+      toast.error(err instanceof Error ? err.message : 'Could not update your reaction.')
     } finally {
       setLikeBusy(false)
     }
@@ -264,23 +238,12 @@ export function PostCard({
 
   const canDelete =
     onDelete &&
-    ((isOfficial && isAdmin) ||
+    ((isOfficial && user?.role === 'admin') ||
       (!isOfficial &&
-        (isAdmin || user?.id === (post as CommunityPostDTO & { authorId?: string }).authorId)))
-
-  // Spec §7/§9/§13 — the member comment/reply feature is REMOVED everywhere,
-  // including the admin surface: NO comment thread, composer, reply buttons
-  // or counts exist on any post card. The only internal surfacing is the
-  // admin-only AI-activity disclosure.
+        (user?.role === 'admin' || user?.id === (post as CommunityPostDTO & { authorId?: string }).authorId)))
 
   return (
-    <article
-      id={officialId ? `post-card-${officialId}` : undefined}
-      className={cn(
-        'animate-in fade-in slide-in-from-bottom-2 duration-300 rounded-2xl border bg-card shadow-sm transition-all hover:border-primary/25 hover:shadow-md',
-        highlight && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
-      )}
-    >
+    <article className="animate-in fade-in slide-in-from-bottom-2 duration-300 rounded-2xl border bg-card shadow-sm transition-all hover:border-primary/25 hover:shadow-md">
       {/* ------------------------------------------------ header */}
       <div className="flex items-start gap-3 p-4 pb-3 sm:p-5 sm:pb-3">
         {officialAuthor ? (
@@ -338,16 +301,16 @@ export function PostCard({
             {category && (
               <button
                 type="button"
-                onClick={() => navigate({ name: 'explore', categorySlug: category.slug })}
-                className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
-                aria-label={`Filter posts in ${category.name}`}
+                onClick={() => navigate({ name: 'category', categorySlug: category.slug })}
+                className="inline-flex max-w-full items-start gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+                aria-label={`View posts in ${category.name}`}
               >
                 <span
-                  className="h-2 w-2 shrink-0 rounded-full"
+                  className="mt-[4px] h-2 w-2 shrink-0 rounded-full"
                   style={{ backgroundColor: category.color || 'var(--primary)' }}
                   aria-hidden="true"
                 />
-                <span className="truncate">{category.name}</span>
+                <span className="break-words" dir="auto">{category.name}</span>
               </button>
             )}
             {official?.isPinned && (
@@ -373,20 +336,20 @@ export function PostCard({
               }
             />
           )}
-          {canDelete && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" aria-label="Post options">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" aria-label="Post options">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {canDelete && (
                 <DropdownMenuItem onClick={handleDelete} disabled={deleting} variant="destructive">
                   <Trash2 className="mr-2 h-4 w-4" /> Delete post
                 </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -475,11 +438,8 @@ export function PostCard({
       )}
 
       {/* ------------------------------------------------ engagement row (official only) */}
-      {/* Footer for every viewer: Views · Like · Save · Share (CTA above  */}
-      {/* when present). No polls, no React feature, no comments, no      */}
-      {/* three-dot menu — for members AND admins alike.                  */}
       {official && (
-        <div className="flex flex-wrap items-center gap-0.5 border-t px-2 py-1 pb-2 pt-1.5 sm:px-3">
+        <div className="flex flex-wrap items-center gap-0.5 border-t px-2 pb-2 pt-1.5 sm:px-3">
           <span
             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs text-muted-foreground"
             title={`${engagement.viewsCount.toLocaleString()} views`}
@@ -495,24 +455,14 @@ export function PostCard({
             onClick={toggleLike}
             disabled={likeBusy}
             aria-pressed={engagement.isLiked}
-            aria-label={
-              engagement.isLiked
-                ? `Unlike this post (${formatCount(engagement.likesCount)} likes)`
-                : `Like this post (${formatCount(engagement.likesCount)} likes)`
-            }
-            title={`${engagement.likesCount.toLocaleString()} likes`}
+            aria-label={engagement.isLiked ? 'Unlike post' : 'Like post'}
             className={cn(
-              'h-11 gap-1.5 px-2.5 text-muted-foreground transition-all hover:text-primary md:h-8',
-              engagement.isLiked &&
-                'bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary',
-              likeBusy && 'cursor-wait opacity-70',
+              'gap-1.5 text-muted-foreground hover:text-red-500 dark:hover:text-red-400',
+              engagement.isLiked && 'text-red-500 hover:text-red-500 dark:hover:text-red-400',
             )}
           >
             <Heart
-              className={cn(
-                'h-4 w-4 transition-transform duration-150',
-                engagement.isLiked && 'fill-primary scale-110',
-              )}
+              className={cn('h-4 w-4', engagement.isLiked && 'fill-red-500')}
               aria-hidden="true"
             />
             <span className="text-xs font-medium">{formatCount(engagement.likesCount)}</span>
@@ -565,18 +515,6 @@ export function PostCard({
             </DropdownMenu>
           </div>
         </div>
-      )}
-
-      {/* --------------------------------------------- AI-activity disclosure (ADMIN only) */}
-      {/* Public members never see AI labels (spec §11): no "AI responses"  */}
-      {/* count, no "Muxamil AI" chip, no AI-generated badges on the public */}
-      {/* card. Admins keep the internal disclosure for moderation.         */}
-      {official && isAdmin && (engagement.aiCommentsCount > 0 || !!official.aiReaction) && (
-        <AiActivitySection
-          postId={official.id}
-          initialCount={engagement.aiCommentsCount}
-          aiReaction={official.aiReaction ?? null}
-        />
       )}
     </article>
   )

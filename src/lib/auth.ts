@@ -32,99 +32,126 @@ export async function createSessionToken(userId: string): Promise<string> {
     .sign(getSecret())
 }
 
-export async function verifySessionToken(token: string): Promise<string | null> {
+export type SessionClaims = { uid: string; iat: number }
+
+export async function verifySessionToken(token: string): Promise<SessionClaims | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret())
     if (typeof payload.uid !== 'string') return null
-    return payload.uid
+    // iat is always set by createSessionToken (setIssuedAt) — treat a token
+    // without it as invalid so the password-rotation check stays sound.
+    if (typeof payload.iat !== 'number') return null
+    return { uid: payload.uid, iat: payload.iat }
   } catch {
     return null
   }
 }
 
-/**
- * Session transport.
- *
- * The app is embedded in a cross-site iframe by the platform preview panel.
- * Browsers REJECT `SameSite=Lax` cookies in that context (the exact root
- * cause of the recurring "You do not have permission to do that." /
- * "Statistics are unavailable right now." dashboard failures: login returned
- * 200 but the session cookie was never stored, so every admin API 401/403'd).
- *
- * Fix: SameSite=None + Secure + Partitioned (CHIPS) so the session cookie
- * survives third-party iframe contexts, plus an Authorization: Bearer
- * fallback for browsers that block third-party cookies entirely (Safari ITP).
- * Both transports carry the SAME signed JWT and go through the SAME
- * server-side verification chain — this is a transport fix only, all
- * authorization checks (requireAdmin / role / blocked) are unchanged.
- */
-export async function setSessionCookie(userId: string): Promise<string> {
+export async function setSessionCookie(userId: string): Promise<void> {
   const token = await createSessionToken(userId)
   const store = await cookies()
+  // Mark the cookie Secure when the request arrived over HTTPS (standard
+  // proxies signal this via X-Forwarded-Proto), so production sessions are
+  // never transmitted over plain HTTP. Plain-HTTP local/sandbox previews
+  // still work — the cookie just isn't flagged Secure there.
+  const hdrs = await headers()
+  const proto = (hdrs.get('x-forwarded-proto') || '').split(',')[0]?.trim()
+  // Sandbox preview panel: the app is embedded as an iframe under a different
+  // top-level site, and browsers only accept cookies for embedded pages when
+  // they are SameSite=None; Secure. The preview edge rewrites Host and always
+  // forwards X-Forwarded-Proto=http, so key off the *original* https origin
+  // (Origin is sent on every POST; Referer is a same-origin fallback) and the
+  // *.space-z.ai preview suffix. Production (muxamil.co) is unaffected and
+  // keeps the stricter Lax policy.
+  const origin = hdrs.get('origin') || hdrs.get('referer') || ''
+  const embeddedPreview = /^https:\/\/[^/]*\.space-z\.ai(?:\/|$)/i.test(origin)
   store.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    sameSite: 'none',
-    secure: true,
-    partitioned: true,
+    sameSite: embeddedPreview ? 'none' : 'lax',
+    secure: embeddedPreview || proto === 'https',
     maxAge: SESSION_TTL_SECONDS,
     path: '/',
   })
-  return token
 }
 
 export async function clearSessionCookie(): Promise<void> {
   const store = await cookies()
-  // The deletion MUST carry the same attributes as the set (Secure +
-  // SameSite=None + Partitioned): Chrome refuses to delete a strictly-secure
-  // cookie via a plain non-Secure expired cookie, which would leave the
-  // session alive and auto-login the user again after logout.
-  store.set(SESSION_COOKIE, '', {
-    httpOnly: true,
-    sameSite: 'none',
-    secure: true,
-    partitioned: true,
-    maxAge: 0,
-    expires: new Date(0),
-    path: '/',
-  })
+  store.delete(SESSION_COOKIE)
 }
 
-/** Extract the uid from an Authorization: Bearer header value. */
-export async function verifyBearerHeader(
-  authHeader: string | null | undefined
-): Promise<string | null> {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null
-  return verifySessionToken(authHeader.slice(7).trim())
+/** Allowed clock skew between the JWT iat claim and the stored
+ *  pw_changed_at marker (JWT iat is second-resolution, DB is ms). */
+const PW_CHANGE_SKEW_MS = 30_000
+
+/** Read the password-rotation marker from mux_profiles.appearance. */
+export function passwordChangedAtFrom(profile: MuxProfileRow): number | null {
+  const raw = profile.appearance?.pw_changed_at
+  if (typeof raw !== 'string') return null
+  const ts = Date.parse(raw)
+  return Number.isFinite(ts) ? ts : null
+}
+
+/** True when the session token was minted BEFORE the user's last password
+ *  change — i.e. a stale session that must not survive a rotation. */
+export function tokenPredatesPasswordChange(claims: SessionClaims, profile: MuxProfileRow): boolean {
+  const changedAt = passwordChangedAtFrom(profile)
+  if (changedAt === null) return false
+  return claims.iat * 1000 < changedAt - PW_CHANGE_SKEW_MS
+}
+
+/** Stamp the password-rotation marker (read-merge-write into the profile's
+ *  appearance jsonb — same convention as the dm_* control keys) so every
+ *  session token issued before `now` dies on its next verification. Callers
+ *  must re-issue the CURRENT session cookie afterwards. */
+export async function markPasswordChanged(userId: string): Promise<boolean> {
+  const { data, error: readError } = await supabase
+    .from('mux_profiles')
+    .select('appearance')
+    .eq('id', userId)
+    .maybeSingle()
+  if (readError) throw new Error(readError.message)
+  const appearance: Record<string, unknown> = {
+    ...((data as { appearance: Record<string, unknown> | null } | null)?.appearance ?? {}),
+  }
+  appearance.pw_changed_at = new Date().toISOString()
+  const { error } = await supabase
+    .from('mux_profiles')
+    .update({ appearance, updated_at: new Date().toISOString() })
+    .eq('id', userId)
+  return !error
 }
 
 /**
  * Resolve the current authenticated user straight from Supabase
  * (mux_profiles). The JWT only carries the user id — role / verification /
  * blocked status is always re-checked server-side so tokens can never hold
- * stale privileges. Session transport: httpOnly cookie first, then the
- * Authorization: Bearer fallback (iframe contexts where the cookie is
- * blocked). Both are the SAME token, verified the SAME way.
+ * stale privileges. Sessions minted before the last password change are
+ * rejected (account-takeover containment: rotating the password kills every
+ * other session, including a thief's).
  */
 export async function getCurrentUser(): Promise<AppUser | null> {
   const store = await cookies()
   const token = store.get(SESSION_COOKIE)?.value
-  let userId: string | null = null
-  if (token) {
-    userId = await verifySessionToken(token)
-  }
-  if (!userId) {
-    // Bearer fallback — headers() is available in route handlers; guard for
-    // any non-request context (build/prerender) where it would throw.
+  if (!token) return null
+  const claims = await verifySessionToken(token)
+  if (!claims) return null
+  const profile = await fetchProfileById(claims.uid)
+  if (!profile) return null
+  if (tokenPredatesPasswordChange(claims, profile)) return null
+
+  // Rolling renewal: once a valid session passes its half-life, transparently
+  // re-issue the cookie. Active users never hit a mid-session expiry, the
+  // absolute lifetime stays capped at SESSION_TTL_SECONDS, and renewal can
+  // never break authentication (e.g. when invoked where cookies are
+  // read-only — it is best-effort by design).
+  if (claims.iat * 1000 < Date.now() - (SESSION_TTL_SECONDS * 1000) / 2) {
     try {
-      const hdrs = await headers()
-      userId = await verifyBearerHeader(hdrs.get('authorization'))
+      await setSessionCookie(profile.id)
     } catch {
-      /* outside a request scope — no bearer transport available */
+      /* renewal is opportunistic — never fail the request over it */
     }
   }
-  if (!userId) return null
-  const profile = await fetchProfileById(userId)
-  if (!profile) return null
+
   return toAppUser(profile)
 }
 

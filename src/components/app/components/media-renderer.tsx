@@ -149,18 +149,18 @@ export function MediaRenderer({
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-1.5">
-                  <a href={a.url || ''} target="_blank" rel="noopener noreferrer">
-                    <span className="sr-only">Open PDF {a.fileName}</span>
-                    <Button variant="ghost" size="sm" className="gap-1.5 text-primary hover:bg-primary/10 hover:text-primary">
+                  <Button variant="ghost" size="sm" asChild className="gap-1.5 text-primary hover:bg-primary/10 hover:text-primary">
+                    <a href={a.url || ''} target="_blank" rel="noopener noreferrer">
+                      <span className="sr-only">Open PDF {a.fileName}</span>
                       <ExternalLink className="h-3.5 w-3.5" /> Open
-                    </Button>
-                  </a>
-                  <a href={a.url || ''} download={a.fileName}>
-                    <span className="sr-only">Download PDF {a.fileName}</span>
-                    <Button variant="outline" size="sm" className="gap-1.5">
+                    </a>
+                  </Button>
+                  <Button variant="outline" size="sm" asChild className="gap-1.5">
+                    <a href={a.url || ''} download={a.fileName}>
+                      <span className="sr-only">Download PDF {a.fileName}</span>
                       <Download className="h-3.5 w-3.5" /> Save
-                    </Button>
-                  </a>
+                    </a>
+                  </Button>
                 </div>
               </div>
             )
@@ -182,18 +182,18 @@ export function MediaRenderer({
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-1.5">
-                  <a href={a.url || ''} target="_blank" rel="noopener noreferrer">
-                    <span className="sr-only">Open document {a.fileName}</span>
-                    <Button variant="ghost" size="sm" className="gap-1.5 text-primary hover:bg-primary/10 hover:text-primary">
+                  <Button variant="ghost" size="sm" asChild className="gap-1.5 text-primary hover:bg-primary/10 hover:text-primary">
+                    <a href={a.url || ''} target="_blank" rel="noopener noreferrer">
+                      <span className="sr-only">Open document {a.fileName}</span>
                       <ExternalLink className="h-3.5 w-3.5" /> Open
-                    </Button>
-                  </a>
-                  <a href={a.url || ''} download={a.fileName}>
-                    <span className="sr-only">Download document {a.fileName}</span>
-                    <Button variant="outline" size="sm" className="gap-1.5">
+                    </a>
+                  </Button>
+                  <Button variant="outline" size="sm" asChild className="gap-1.5">
+                    <a href={a.url || ''} download={a.fileName}>
+                      <span className="sr-only">Download document {a.fileName}</span>
                       <Download className="h-3.5 w-3.5" /> Save
-                    </Button>
-                  </a>
+                    </a>
+                  </Button>
                 </div>
               </div>
             )

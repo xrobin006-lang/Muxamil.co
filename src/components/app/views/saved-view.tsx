@@ -19,7 +19,7 @@ type BookmarksResponse = {
 /** While the view is mounted, keep the list in sync with the bookmark toggle
  *  inside PostCard (the card owns its local save state): refetch silently on a
  *  30s interval and whenever the window regains focus. */
-const REFRESH_INTERVAL_MS = 30_000
+const POLL_INTERVAL_MS = 30_000
 
 export default function SavedView() {
   const navigate = useAppStore((s) => s.navigate)
@@ -66,7 +66,7 @@ export default function SavedView() {
   useEffect(() => {
     const interval = setInterval(() => {
       if (document.visibilityState === 'visible') void load({ silent: true })
-    }, REFRESH_INTERVAL_MS)
+    }, POLL_INTERVAL_MS)
     const onFocus = () => void load({ silent: true })
     window.addEventListener('focus', onFocus)
     return () => {

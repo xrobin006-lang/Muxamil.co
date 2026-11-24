@@ -20,3 +20,17 @@ mini-services/realtime-service/.env
 /db/*.sqlite
 /db/*.sqlite3
 /upload/
+
+# Muxamil integration safety rules
+
+# Never commit environment secrets
+.env*
+!.env.example
+!**/.env.example
+
+# Generated and local files
+node_modules/
+.next/
+.vercel/
+*.log
+/src/generated/wg-prisma/

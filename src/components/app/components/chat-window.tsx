@@ -33,6 +33,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  ShoppingBag,
   Trash2,
   X,
   type LucideIcon,
@@ -52,11 +53,13 @@ import { apiGet, apiJson, apiUpload } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
 import { getSocket, useSocketEvent } from '@/hooks/use-realtime'
-import type { MessageDTO } from '@/lib/types'
+import type { MessageDTO, OrderCardDTO } from '@/lib/types'
 import { timeAgo } from '@/lib/format'
 import { UserAvatar } from './user-avatar'
 import { VerifiedBadge } from './verified-badge'
 import { EmptyState } from './empty-state'
+import { ChatOrderCard } from './product-card'
+import { formatPrice } from '@/lib/store-format'
 import { cn } from '@/lib/utils'
 
 type MessagesResponse = { conversationId: string | null; messages: MessageDTO[]; hasMore: boolean }
@@ -98,10 +101,17 @@ export interface ChatWindowProps {
   emptyTitle?: string
   emptyDescription?: string
   className?: string
+  /**
+   * Store order context (requirement 24): an order id armed by the product
+   * page's Order Now action. Shows a product/order card above the composer
+   * and attaches the order to the NEXT message the user intentionally sends.
+   */
+  orderContext?: string
 }
 
 /** Short single-line preview of a message, shared with conversation lists. */
-export function messagePreview(msg: Pick<MessageDTO, 'content' | 'messageType'>): string {
+export function messagePreview(msg: Pick<MessageDTO, 'content' | 'messageType' | 'order'>): string {
+  if (msg.messageType === 'order') return `🛍️ ${msg.order?.productName ?? 'Product order'}`
   if (msg.content) return msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content
   if (msg.messageType === 'image') return '📷 Photo'
   if (msg.messageType === 'audio') return '🎙️ Voice message'
@@ -344,11 +354,13 @@ function MessageBubble({
   isOwn,
   highlightQuery,
   isCurrentMatch,
+  onOpenProduct,
 }: {
   message: MessageDTO
   isOwn: boolean
   highlightQuery?: string
   isCurrentMatch?: boolean
+  onOpenProduct?: (slug: string) => void
 }) {
   const pending = message.id.startsWith(TEMP_PREFIX)
 
@@ -419,6 +431,9 @@ function MessageBubble({
             <Download className="h-4 w-4 shrink-0 opacity-70" aria-hidden="true" />
           </a>
         )}
+        {message.messageType === 'order' && message.order && (
+          <ChatOrderCard order={message.order} isOwn={isOwn} onOpenProduct={onOpenProduct} />
+        )}
         {message.content && (
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed" dir="auto">
             <HighlightedText text={message.content} query={highlightQuery} />
@@ -465,8 +480,10 @@ export default function ChatWindow({
   emptyTitle,
   emptyDescription,
   className,
+  orderContext,
 }: ChatWindowProps) {
   const user = useAppStore((s) => s.user)!
+  const navigate = useAppStore((s) => s.navigate)
 
   const [messages, setMessages] = useState<MessageDTO[]>([])
   const [activeId, setActiveId] = useState<string | null>(conversationId)
@@ -480,6 +497,40 @@ export default function ChatWindow({
   const [draft, setDraft] = useState('')
   const [attachment, setAttachment] = useState<PendingAttachment | null>(null)
   const [upload, setUpload] = useState<{ name: string; progress: number } | null>(null)
+
+  // ---- Store order context (requirement 24–25) --------------------------------
+  // The card above the composer; armed by the product page's Order Now action
+  // and cleared after the user's intentional send (or manual dismiss).
+  const [orderCard, setOrderCard] = useState<OrderCardDTO | null>(null)
+  const orderContextRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    orderContextRef.current = orderContext ?? null
+    setOrderCard(null)
+    if (!orderContext) return
+    let cancelled = false
+    apiGet<{ order: OrderCardDTO }>(`/api/store/orders?id=${encodeURIComponent(orderContext)}`)
+      .then((data) => {
+        if (!cancelled) setOrderCard(data.order)
+      })
+      .catch(() => {
+        /* The order banner simply stays hidden; ordering still works — the
+           send route re-verifies the order id server-side. */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [orderContext])
+
+  // Pre-fill the composer ONCE when the order context arrives (requirement
+  // 25): the customer can edit it and must intentionally press Send.
+  const orderPrefilledRef = useRef(false)
+  useEffect(() => {
+    if (!orderCard || orderPrefilledRef.current) return
+    orderPrefilledRef.current = true
+    setDraft((prev) => (prev.trim() ? prev : 'Hi, I want to order this product.'))
+  }, [orderCard])
+
   const [atBottom, setAtBottom] = useState(true)
   const [peerTyping, setPeerTyping] = useState(false)
   /** Message id that starts the unread block — divider renders above it. */
@@ -871,6 +922,14 @@ export default function ChatWindow({
     )
   })
 
+  // Realtime: an order's status/payment changed — refresh the order cards
+  // rendered in this conversation (lightweight: reload the current page of
+  // messages only when the window shows an order message or the order context).
+  useSocketEvent('store:order-updated', () => {
+    const hasOrder = orderContextRef.current !== null || messages.some((m) => m.messageType === 'order')
+    if (hasOrder) setReloadKey((k) => k + 1)
+  })
+
   // Realtime: peer typing indicator ('from' is a user id, or 'admin' when a
   // member receives it from the admin team). Auto-expires after 4s of silence.
   useSocketEvent('chat:typing', (payload) => {
@@ -909,7 +968,10 @@ export default function ChatWindow({
     if (sending || upload) return
     const content = draft.trim()
     const att = attachment
-    if (!content && !att) return
+    // An armed order context rides along even on a text-only send (the server
+    // re-verifies ownership — the client value is never trusted).
+    const orderId = orderContextRef.current ?? undefined
+    if (!content && !att && !orderId) return
 
     const tempId = `${TEMP_PREFIX}${Date.now()}`
     const optimistic: MessageDTO = {
@@ -920,11 +982,12 @@ export default function ChatWindow({
       senderAvatar: user.avatarUrl,
       senderRole: user.role,
       content,
-      messageType: att ? att.kind : 'text',
+      messageType: orderId && !att ? 'order' : att ? att.kind : 'text',
       attachmentUrl: att?.url ?? null,
       attachmentName: att?.fileName ?? null,
       readAt: null,
       createdAt: new Date().toISOString(),
+      ...(orderId && !att ? { order: orderCard ?? null } : {}),
     }
 
     setMessages((prev) => [...prev, optimistic])
@@ -940,6 +1003,7 @@ export default function ChatWindow({
         content,
         messageType: att ? att.kind : 'text',
         ...(att ? { attachmentUrl: att.url, attachmentName: att.fileName } : {}),
+        ...(orderId ? { orderId } : {}),
         ...(activeIdRef.current ? { conversationId: activeIdRef.current } : {}),
       }
       const res = await apiJson<{ message: MessageDTO }>('/api/chat/messages', 'POST', body)
@@ -954,6 +1018,12 @@ export default function ChatWindow({
         activeIdRef.current = res.message.conversationId
         setActiveId(res.message.conversationId)
       }
+      // The order context is now attached to the sent message — clear the
+      // banner so it does not ride along with later messages (requirement 26).
+      if (orderId) {
+        orderContextRef.current = null
+        setOrderCard(null)
+      }
     } catch (err) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId))
       setDraft(content)
@@ -962,7 +1032,7 @@ export default function ChatWindow({
     } finally {
       setSending(false)
     }
-  }, [attachment, draft, emitTyping, resetTextarea, scheduleScrollToEnd, sending, upload, user])
+  }, [attachment, draft, emitTyping, orderCard, resetTextarea, scheduleScrollToEnd, sending, upload, user])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1276,6 +1346,11 @@ export default function ChatWindow({
                         isOwn={message.senderId === user.id}
                         highlightQuery={lowerQuery || undefined}
                         isCurrentMatch={activeMatchId === message.id}
+                        onOpenProduct={
+                          message.order?.productSlug
+                            ? (slug) => navigate({ name: 'product', productSlug: slug })
+                            : undefined
+                        }
                       />
                     </Fragment>
                   )
@@ -1316,6 +1391,47 @@ export default function ChatWindow({
 
       {/* Composer */}
       <div className="shrink-0 border-t bg-card p-3 sm:px-4">
+        {/* Store order context banner (requirement 24) — the product the
+            customer is ordering, attached to the next intentional send. */}
+        {orderCard && (
+          <div className="mb-2 flex items-center gap-3 rounded-xl border border-primary/25 bg-primary/[0.05] p-2 animate-in fade-in slide-in-from-bottom-1 duration-150">
+            {orderCard.productImage ? (
+              <img
+                src={orderCard.productImage}
+                alt={orderCard.productName}
+                className="h-12 w-12 shrink-0 rounded-lg border object-contain p-0.5"
+              />
+            ) : (
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <ShoppingBag className="h-5 w-5" aria-hidden="true" />
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-bold" dir="auto">
+                {orderCard.productName}
+              </p>
+              <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                Order #{orderCard.orderNo} ·{' '}
+                <span className="font-semibold tabular-nums">
+                  {orderCard.price !== null ? formatPrice(orderCard.price, orderCard.currency) : 'Price on request'}
+                </span>
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => {
+                orderContextRef.current = null
+                setOrderCard(null)
+              }}
+              disabled={sending || !!upload}
+              aria-label="Remove the order context from your next message"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </Button>
+          </div>
+        )}
         {upload && (
           <div className="mb-2 rounded-xl border bg-muted/40 p-2.5">
             <div className="flex items-center gap-2">

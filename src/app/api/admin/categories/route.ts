@@ -2,7 +2,8 @@ import { NextRequest } from 'next/server'
 import { supabase, freshId, nowIso } from '@/lib/supabase'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { requireAdmin } from '@/lib/auth'
-import { auditLog } from '@/lib/realtime'
+import { auditLog, emitRealtime } from '@/lib/realtime'
+import { readCategoryBanners } from '@/lib/explore-layout'
 import type { CategoryDTO } from '@/lib/types'
 
 type CategoryRow = {
@@ -63,15 +64,18 @@ async function uniqueCategorySlug(name: string, exceptId?: string): Promise<stri
 export async function GET() {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
-    const [{ data: rows, error }, { data: postRows, error: postErr }] = await Promise.all([
+    const [{ data: rows, error }, { data: postRows, error: postErr }, banners] = await Promise.all([
       supabase
         .from('mux_categories')
         .select('*')
         .order('sort_order', { ascending: true })
         .order('name', { ascending: true }),
       supabase.from('mux_posts').select('category_id').limit(10_000),
+      // SPEC-3: per-category banner pointers (homepage_sections) for previews.
+      // Degrade to an empty map — the category list itself stays authoritative.
+      readCategoryBanners().catch(() => new Map<string, { url: string; path: string }>()),
     ])
     if (error) throw new Error(error.message)
     if (postErr) throw new Error(postErr.message)
@@ -81,9 +85,10 @@ export async function GET() {
       if (p.category_id) counts.set(p.category_id, (counts.get(p.category_id) ?? 0) + 1)
     }
 
-    const categories = ((rows as CategoryRow[]) ?? []).map((c) =>
-      categoryOut(c, counts.get(c.id) ?? 0)
-    )
+    const categories = ((rows as CategoryRow[]) ?? []).map((c) => ({
+      ...categoryOut(c, counts.get(c.id) ?? 0),
+      banner_url: banners.get(c.id)?.url ?? null,
+    }))
     return ok({ categories })
   })
 }
@@ -92,7 +97,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const body = await req.json().catch(() => null)
     const name = typeof body?.name === 'string' ? body.name.trim() : ''
@@ -136,6 +141,9 @@ export async function POST(req: NextRequest) {
       targetId: row.id,
       metadata: { name, slug },
     })
+
+    // Live refresh for every open Explore/feed/admin-categories client.
+    await emitRealtime({ event: 'categories:changed', room: 'all', payload: { id: row.id } })
     return ok({ category: categoryOut(data as CategoryRow, 0) })
   })
 }

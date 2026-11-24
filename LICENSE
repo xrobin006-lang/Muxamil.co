@@ -1,0 +1,36 @@
+Muxamil.co (CommHub) — Proprietary License
+===========================================
+
+Copyright (c) 2026 Muxamil.co. All rights reserved.
+
+1. GRANT. No license is granted under this notice. This source code and its
+   accompanying assets are the private property of the copyright holder and
+   are provided solely to the recipient for the purpose of operating the
+   Muxamil.co platform on infrastructure controlled by the copyright holder.
+
+2. RESTRICTIONS. You may NOT: (a) redistribute, sublicense, sell, lease, or
+   publish this software or any derivative work, in source or object form;
+   (b) remove or obscure any copyright, trademark, or attribution notices;
+   (c) use the software to operate a competing community platform; or
+   (d) permit any third party to do any of the foregoing.
+
+3. TRADEMARKS. "Muxamil", "Muxamil.co", the Muxamil logos, brand assets and
+   visual identity (including the files under public/branding/) are trademarks
+   of the copyright holder and may not be used without prior written consent.
+
+4. THIRD-PARTY COMPONENTS. The software incorporates open-source components
+   (including but not limited to Next.js, React, Tailwind CSS, shadcn/ui,
+   Radix UI, Supabase client libraries, socket.io, Zustand, recharts,
+   lucide-react) that remain licensed under their respective open-source
+   licenses. Nothing in this notice limits your rights under those licenses
+   with respect to those components.
+
+5. NO WARRANTY. The software is provided "AS IS", without warranty of any
+   kind, express or implied, including but not limited to the warranties of
+   merchantability, fitness for a particular purpose and noninfringement.
+   In no event shall the copyright holder be liable for any claim, damages
+   or other liability arising from, out of or in connection with the software
+   or its use.
+
+6. PRIVATE SOURCE. This is private source code. Do not redistribute.
+   (Matches README §14.)

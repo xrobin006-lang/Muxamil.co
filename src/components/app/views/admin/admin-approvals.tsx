@@ -257,7 +257,8 @@ export default function AdminApprovals() {
                 const isLong = post.content.length > 600
                 const expanded = expandedIds.has(post.id)
                 return (
-                  <div className="mt-2">\n                    <div
+                  <div className="mt-2">
+                    <div
                       className={cn(
                         'whitespace-pre-wrap break-words text-[15px] leading-relaxed',
                         isLong && !expanded && 'line-clamp-6',
@@ -290,7 +291,6 @@ export default function AdminApprovals() {
                 <Button
                   onClick={() => setApproveTarget(post)}
                   disabled={removingIds.has(post.id)}
-                  className="bg-emerald-600 text-white shadow-xs hover:bg-emerald-700"
                 >
                   <Check className="mr-1.5 h-4 w-4" aria-hidden="true" /> Approve
                 </Button>
@@ -320,7 +320,6 @@ export default function AdminApprovals() {
                 e.preventDefault()
                 if (approveTarget) reviewPost(approveTarget, 'approve')
               }}
-              className="bg-emerald-600 text-white hover:bg-emerald-700"
             >
               {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-4 w-4" aria-hidden="true" />}
               {busy ? 'Approving…' : 'Approve post'}

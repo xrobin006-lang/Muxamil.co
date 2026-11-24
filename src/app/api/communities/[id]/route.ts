@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { ok, guard, errors } from '@/lib/api-helpers'
+import { ok, guard, errors, parseKeysetCursor } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
 import type { AttachmentDTO, CommunityDTO, CommunityPostDTO } from '@/lib/types'
 
@@ -149,11 +149,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       .eq('status', 'approved')
 
     if (cursor) {
-      const sep = cursor.lastIndexOf('|')
-      if (sep > 0) {
-        const ts = cursor.slice(0, sep)
-        const cursorId = cursor.slice(sep + 1)
-        q = q.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${cursorId})`)
+      const parsed = parseKeysetCursor(cursor)
+      if (parsed) {
+        q = q.or(`created_at.lt.${parsed.ts},and(created_at.eq.${parsed.ts},id.lt.${parsed.id})`)
       }
     }
 

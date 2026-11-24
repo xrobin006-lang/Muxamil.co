@@ -26,7 +26,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { apiJson, clearSessionToken } from '@/lib/api-client'
+import { apiJson } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { formatFullDate } from '@/lib/format'
 import { UserAvatar } from '../components/user-avatar'
@@ -106,7 +106,6 @@ export default function SettingsView() {
     } catch {
       /* best effort — clear the local session regardless */
     } finally {
-      clearSessionToken()
       reset()
     }
   }

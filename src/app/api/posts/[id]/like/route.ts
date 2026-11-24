@@ -2,18 +2,12 @@ import { NextRequest } from 'next/server'
 import { supabase, freshId, nowIso, fetchSiteSettings } from '@/lib/supabase'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
-import { notifyUser, emitRealtime } from '@/lib/realtime'
+import { notifyUser } from '@/lib/realtime'
 
 /**
- * Toggle the requesting user's LIKE on a post (the member engagement
- * primitive — spec: one like per user per post, DB-backed, toggles both
- * directions, never localStorage).
- *
- * Real likes live in mux_post_likes (UNIQUE(post_id,user_id) — duplicates
- * are impossible at the DB level). The admin display override
- * (like_count_adjustment) is preserved by recomputing
- * likes_count = likes_real + adjustment — real rows are never touched by
- * overrides and overrides never create/delete real rows.
+ * Toggle the requesting user's like on a post. Likes are real engagement —
+ * the admin display override (like_count_adjustment) is preserved by
+ * recomputing likes_count = likes_real + adjustment.
  */
 export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
@@ -22,7 +16,7 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
 
     const settings = await fetchSiteSettings()
     if (!settings.likes_enabled) {
-      return fail('Likes are disabled.', 403)
+      return fail('Reactions are disabled.', 403)
     }
 
     const { id } = await ctx.params
@@ -61,15 +55,8 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
         user_id: user.id,
         created_at: now,
       })
-      if (insError) {
-        // 23505 = unique(post_id,user_id) — a concurrent request already
-        // inserted this user's like. Converge to the liked state instead of
-        // erroring: duplicate rows are structurally impossible.
-        if (insError.code !== '23505') throw new Error(insError.message)
-        liked = true
-      } else {
-        liked = true
-      }
+      if (insError) throw new Error(insError.message)
+      liked = true
     }
 
     // --- recompute real + displayed -----------------------------------------
@@ -107,13 +94,6 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
         })
       }
     }
-
-    // --- live count sync for other open tabs ---------------------------------
-    emitRealtime({
-      event: 'likes:new',
-      room: 'all',
-      payload: { postId: id, userId: user.id, liked, likesCount },
-    }).catch(() => {})
 
     return ok({ liked, likesCount })
   })

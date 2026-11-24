@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto'
 import {
   supabase,
   fetchProfileById,
@@ -69,8 +70,11 @@ export async function ensureSharedProfilesRow(
     if (!rpc.error && typeof rpc.data === 'string' && rpc.data.length >= 4) {
       referralCode = rpc.data
     } else {
+      // Fallback generator — crypto.randomInt (NOT Math.random) per the
+      // security spec: never use Math.random for anything that could ever be
+      // treated as a credential-adjacent value, even a shareable referral code.
       referralCode = Array.from({ length: 8 }, () =>
-        'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.charAt(Math.floor(Math.random() * 32))
+        'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.charAt(randomInt(32))
       ).join('')
     }
 

@@ -82,6 +82,7 @@ export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'regi
   const platformName = branding?.platform_name?.trim() || 'Muxamil.co'
   const supportEmail = branding?.support_email?.trim() || null
   const registrationClosed = branding !== null && branding.registration_enabled === false
+  const footerNote = branding?.footer_text?.trim() || 'A safe, moderated community platform.'
 
   return (
     <div className="flex min-h-screen flex-col overflow-x-clip bg-background text-foreground">
@@ -130,7 +131,7 @@ export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'regi
 
               <h1 className="mt-5 text-4xl font-bold leading-[1.1] tracking-tight md:text-5xl lg:text-6xl">
                 One home for your{' '}
-                <span className="bg-gradient-to-r from-emerald-700 to-teal-600 bg-clip-text text-transparent dark:from-emerald-400 dark:to-teal-300">
+                <span className="bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent dark:from-primary dark:to-primary/70">
                   entire community.
                 </span>
               </h1>
@@ -203,7 +204,7 @@ export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'regi
                     Everything happening across the community this week — new members, highlights and
                     upcoming events.
                   </p>
-                  <div className="mt-4 flex h-28 items-center justify-center rounded-xl border border-primary/10 bg-gradient-to-br from-emerald-500/25 via-teal-500/15 to-transparent sm:h-32">
+                  <div className="mt-4 flex h-28 items-center justify-center rounded-xl border border-primary/10 bg-gradient-to-br from-primary/25 via-primary/10 to-transparent sm:h-32">
                     <span className="flex h-9 w-9 items-center justify-center rounded-full bg-card/90 text-primary shadow-sm">
                       <ImageIcon className="h-4 w-4" />
                     </span>
@@ -277,7 +278,7 @@ export default function LandingView({ onAuth }: { onAuth: (mode: 'login' | 'regi
       <footer className="mt-auto border-t">
         <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-3 px-4 py-8 text-sm text-muted-foreground sm:flex-row sm:px-6">
           <p>
-            © {new Date().getFullYear()} {platformName} — A safe, moderated community platform.
+            © {new Date().getFullYear()} {platformName} — {footerNote}
           </p>
           {supportEmail && (
             <a

@@ -5,6 +5,7 @@ import {
   Bell,
   BellRing,
   MessageSquare,
+  MessageCircle,
   Home,
   Users,
   User as UserIcon,
@@ -25,7 +26,26 @@ import {
   Bookmark,
   Tags,
   BarChart3,
+  ShieldBan,
   Link2,
+  Search,
+  FolderKanban,
+  Store as StoreIcon,
+  Package,
+  BookOpen,
+  ArrowUpRight,
+  GraduationCap,
+  Mail,
+  Gift,
+  BookOpenText,
+  Clapperboard,
+  FileSearch,
+  Banknote,
+  Wallet,
+  Palette,
+  History,
+  Inbox,
+  Coins,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -44,9 +64,11 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useAppStore, type View } from '@/stores/app-store'
 import { apiGet } from '@/lib/api-client'
-import { useServiceWorker } from '@/hooks/use-service-worker'
+import { useSocketEvent } from '@/hooks/use-realtime'
 import { UserAvatar } from './components/user-avatar'
 import { VerifiedBadge } from './components/verified-badge'
+import { AdminSearch, useAdminSearchShortcut } from './components/admin-search'
+import { StoreMobileNav } from './components/store/store-chrome'
 import type { PublicSettings } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -54,8 +76,10 @@ import FeedView from './views/feed-view'
 import PeopleView from './views/people-view'
 import NotificationsView from './views/notifications-view'
 import ChatView from './views/chat-view'
+import DmView from './views/dm-view'
 import ProfileView from './views/profile-view'
 import UserProfileView from './views/user-profile-view'
+import FollowingView from './views/following-view'
 import CommunityView from './views/community-view'
 import MyCommunityView from './views/my-community-view'
 import SettingsView from './views/settings-view'
@@ -67,66 +91,180 @@ import AdminCommunities from './views/admin/admin-communities'
 import AdminMessages from './views/admin/admin-messages'
 import AdminSettings from './views/admin/admin-settings'
 import AdminCategories from './views/admin/admin-categories'
+import AdminProjects from './views/admin/admin-projects'
 import AdminAnalytics from './views/admin/admin-analytics'
+import AdminModeration from './views/admin/admin-moderation'
 import AdminLinks from './views/admin/admin-links'
+import AdminWorkGuideline from './views/admin/admin-work-guideline'
 import ExploreView from './views/explore-view'
+import CategoriesView from './views/categories-view'
+import CategoryView from './views/category-view'
+import ProjectsView from './views/projects-view'
+import ProjectView from './views/project-view'
+import StoreView from './views/store-view'
+import ProductView from './views/product-view'
+import CheckoutView from './views/checkout-view'
+import MyOrdersView from './views/my-orders-view'
+import AdminStore from './views/admin/admin-store'
 import SavedView from './views/saved-view'
 
-type NavItem = { label: string; icon: typeof Home; view: View; badge?: 'notifications' | 'messages' }
+type NavItem = { label: string; icon: typeof Home; view: View; badge?: 'notifications' | 'messages' | 'dm' | 'approvals' }
+type NavGroup = { label: string; items: NavItem[] }
 
 const USER_NAV: NavItem[] = [
   { label: 'Home', icon: Home, view: { name: 'feed' } },
   { label: 'Explore', icon: Compass, view: { name: 'explore' } },
+  { label: 'Store', icon: StoreIcon, view: { name: 'store' } },
   { label: 'People', icon: Users, view: { name: 'people' } },
   { label: 'Saved', icon: Bookmark, view: { name: 'saved' } },
   { label: 'Admin Chat', icon: MessageSquare, view: { name: 'chat' }, badge: 'messages' },
+  { label: 'Direct Messages', icon: MessageCircle, view: { name: 'dm' }, badge: 'dm' },
   { label: 'Notifications', icon: Bell, view: { name: 'notifications' }, badge: 'notifications' },
 ]
 
 const USER_NAV_SECONDARY: NavItem[] = [
   { label: 'My Community', icon: UsersRound, view: { name: 'my-community' } },
   { label: 'Profile', icon: UserIcon, view: { name: 'profile' } },
+  { label: 'My Orders', icon: Package, view: { name: 'my-orders' } },
   { label: 'Settings', icon: SettingsIcon, view: { name: 'settings' } },
 ]
 
-const ADMIN_NAV: NavItem[] = [
-  { label: 'Dashboard', icon: LayoutDashboard, view: { name: 'admin-dashboard' } },
-  { label: 'Messages', icon: MessagesSquare, view: { name: 'admin-messages' }, badge: 'messages' },
-  { label: 'Approvals', icon: CheckCircle2, view: { name: 'admin-approvals' } },
-  { label: 'Posts', icon: FileText, view: { name: 'admin-posts' } },
-  { label: 'Categories', icon: Tags, view: { name: 'admin-categories' } },
-  { label: 'Users', icon: UserCheck, view: { name: 'admin-users' } },
+/** Member bottom-bar slots flanking the floating Store button (explicit, so
+ *  sidebar re-ordering can never accidentally duplicate a slot). */
+const MEMBER_MOBILE_NAV: NavItem[] = [
+  { label: 'Home', icon: Home, view: { name: 'feed' } },
+  { label: 'Explore', icon: Compass, view: { name: 'explore' } },
+  { label: 'People', icon: Users, view: { name: 'people' } },
+  { label: 'Saved', icon: Bookmark, view: { name: 'saved' } },
 ]
 
-const ADMIN_NAV_SECONDARY: NavItem[] = [
-  { label: 'Analytics', icon: BarChart3, view: { name: 'admin-analytics' } },
-  { label: 'CTA Links', icon: Link2, view: { name: 'admin-links' } },
-  { label: 'Communities', icon: UsersRound, view: { name: 'admin-communities' } },
-  { label: 'Settings', icon: SettingsIcon, view: { name: 'admin-settings' } },
+/**
+ * Admin navigation, organized into logical sections. Work Hub management is
+ * mounted natively in this same console and uses the shared Muxamil session.
+ */
+const ADMIN_NAV_GROUPS: NavGroup[] = [
+  {
+    label: 'Overview',
+    items: [
+      { label: 'Dashboard', icon: LayoutDashboard, view: { name: 'admin-dashboard' } },
+      { label: 'Analytics', icon: BarChart3, view: { name: 'admin-analytics' } },
+    ],
+  },
+  {
+    label: 'Communication',
+    items: [
+      { label: 'Messages', icon: MessagesSquare, view: { name: 'admin-messages' }, badge: 'messages' },
+    ],
+  },
+  {
+    label: 'Content',
+    items: [
+      { label: 'Official Posts', icon: FileText, view: { name: 'admin-posts' } },
+      { label: 'Categories', icon: Tags, view: { name: 'admin-categories' } },
+      { label: 'Projects', icon: FolderKanban, view: { name: 'admin-projects' } },
+      { label: 'CTA Buttons', icon: Link2, view: { name: 'admin-links' } },
+    ],
+  },
+  {
+    label: 'Store',
+    items: [
+      { label: 'Store', icon: StoreIcon, view: { name: 'admin-store' } },
+    ],
+  },
+  {
+    label: 'Members',
+    items: [
+      { label: 'Users', icon: UserCheck, view: { name: 'admin-users' } },
+      { label: 'Communities', icon: UsersRound, view: { name: 'admin-communities' } },
+    ],
+  },
+  {
+    label: 'Review & Safety',
+    items: [
+      { label: 'Approvals', icon: CheckCircle2, view: { name: 'admin-approvals' }, badge: 'approvals' },
+      { label: 'Moderation', icon: ShieldBan, view: { name: 'admin-moderation' } },
+    ],
+  },
+  {
+    label: 'Work Hub · Programs & Learning',
+    items: [
+      { label: 'Work Hub Overview', icon: LayoutDashboard, view: { name: 'admin-work-guideline', section: 'overview' } },
+      { label: 'Microsoft Rewards', icon: GraduationCap, view: { name: 'admin-work-guideline', section: 'programs' } },
+      { label: 'Gmail Rewards', icon: Mail, view: { name: 'admin-work-guideline', section: 'gmail-task' } },
+      { label: 'Gift Card Rates', icon: Gift, view: { name: 'admin-work-guideline', section: 'card-rates' } },
+      { label: 'Read Guides', icon: BookOpenText, view: { name: 'admin-work-guideline', section: 'guides' } },
+      { label: 'Tutorial Videos', icon: Clapperboard, view: { name: 'admin-work-guideline', section: 'videos' } },
+    ],
+  },
+  {
+    label: 'Work Hub · Operations',
+    items: [
+      { label: 'Submissions', icon: FileSearch, view: { name: 'admin-work-guideline', section: 'submissions' } },
+      { label: 'Payments & Payouts', icon: Banknote, view: { name: 'admin-work-guideline', section: 'payments' } },
+      { label: 'Work Hub Members', icon: UserCheck, view: { name: 'admin-work-guideline', section: 'members' } },
+      { label: 'Contact Messages', icon: Inbox, view: { name: 'admin-work-guideline', section: 'contact-messages' } },
+    ],
+  },
+  {
+    label: 'Work Hub · Configuration',
+    items: [
+      { label: 'Branding & Content', icon: Palette, view: { name: 'admin-work-guideline', section: 'branding' } },
+      { label: 'Payout Methods', icon: Wallet, view: { name: 'admin-work-guideline', section: 'payment-methods' } },
+      { label: 'Website Settings', icon: SettingsIcon, view: { name: 'admin-work-guideline', section: 'settings' } },
+      { label: 'Currency Settings', icon: Coins, view: { name: 'admin-work-guideline', section: 'currency' } },
+      { label: 'Work Hub Activity Log', icon: History, view: { name: 'admin-work-guideline', section: 'activity' } },
+    ],
+  },
+  {
+    label: 'Settings',
+    items: [{ label: 'Platform Settings', icon: SettingsIcon, view: { name: 'admin-settings' } }],
+  },
+]
+
+/** The four most useful mobile destinations for an admin (bottom bar). */
+const ADMIN_MOBILE_NAV: NavItem[] = [
+  { label: 'Dashboard', icon: LayoutDashboard, view: { name: 'admin-dashboard' } },
+  { label: 'Messages', icon: MessagesSquare, view: { name: 'admin-messages' }, badge: 'messages' },
+  { label: 'Approvals', icon: CheckCircle2, view: { name: 'admin-approvals' }, badge: 'approvals' },
+  { label: 'Users', icon: UserCheck, view: { name: 'admin-users' } },
 ]
 
 const VIEW_TITLES: Record<string, string> = {
   feed: 'Home',
   explore: 'Explore',
+  categories: 'Categories',
   people: 'People',
-  saved: 'Saved Posts',
+  saved: 'Saved',
   notifications: 'Notifications',
   chat: 'Admin Chat',
+  dm: 'Direct Messages',
   profile: 'My Profile',
   user: 'Profile',
+  following: 'Following',
   community: 'Community',
+  category: 'Category',
+  projects: 'Projects',
+  project: 'Project',
+  store: 'Store',
+  product: 'Product',
+  checkout: 'Checkout',
+  'my-orders': 'My Orders',
   'my-community': 'My Community',
   settings: 'Settings',
   'admin-dashboard': 'Dashboard',
   'admin-users': 'Users',
   'admin-posts': 'Official Posts',
   'admin-categories': 'Categories',
+  'admin-projects': 'Projects',
+  'admin-store': 'Store',
   'admin-analytics': 'Analytics',
-  'admin-links': 'CTA Links',
-  'admin-approvals': 'Pending Approvals',
+  'admin-moderation': 'Moderation',
+  'admin-links': 'CTA Buttons',
+  'admin-approvals': 'Approvals',
   'admin-communities': 'Communities',
   'admin-messages': 'Messages',
   'admin-settings': 'Platform Settings',
+  'admin-work-guideline': 'Work Hub Administration',
 }
 
 /** Brand mark: fetched logo when available, otherwise the chat-bubble monogram. */
@@ -161,85 +299,218 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const back = useAppStore((s) => s.back)
   const unreadNotifications = useAppStore((s) => s.unreadNotifications)
   const unreadMessages = useAppStore((s) => s.unreadMessages)
+  const unreadDm = useAppStore((s) => s.dmUnread)
 
-  // Web Push service worker (no-op where unsupported).
-  useServiceWorker()
+  const isAdmin = user.role === 'admin'
+
+  /** The storefront views render IMMERSIVELY: they bring their own chrome
+   *  (dynamic header, footer and mobile bottom nav), so the app sidebar,
+   *  header and footer step aside while a store view is active. Every other
+   *  view keeps the standard layout untouched. */
+  const storeImmersive = view.name === 'store' || view.name === 'product' || view.name === 'checkout'
+
+  // Admin quick-search palette (Ctrl/Cmd+K) + mobile drawer state.
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  useAdminSearchShortcut(searchOpen, setSearchOpen)
+
+  // Pending-approvals badge for the nav (amber). Fetched once per session and
+  // refreshed when new submissions arrive or when the queue is visited.
+  const [pendingApprovals, setPendingApprovals] = useState(0)
+  useEffect(() => {
+    if (!isAdmin) return
+    apiGet<{ pendingPosts: number }>('/api/admin/stats')
+      .then((s) => setPendingApprovals(s.pendingPosts ?? 0))
+      .catch(() => {
+        /* decorative badge — stays hidden (0) when unavailable */
+      })
+  }, [isAdmin])
+  useSocketEvent('community-post:new', () => {
+    if (!isAdmin) return
+    setPendingApprovals((n) => n + 1)
+  })
+  useEffect(() => {
+    if (!isAdmin || view.name !== 'admin-approvals') return
+    apiGet<{ pendingPosts: number }>('/api/admin/stats')
+      .then((s) => setPendingApprovals(s.pendingPosts ?? 0))
+      .catch(() => {
+        /* keep the last known count */
+      })
+  }, [isAdmin, view.name])
 
   // Platform branding (site name) for the sidebar header — public endpoint.
   const [platformName, setPlatformName] = useState('Muxamil.co')
   const [logoUrl, setLogoUrl] = useState<string | null>(null)
+  const [footerNote, setFooterNote] = useState('a safe, moderated community platform.')
 
   useEffect(() => {
     apiGet<{ settings: PublicSettings }>('/api/settings')
       .then((data) => {
         if (data.settings.platform_name?.trim()) setPlatformName(data.settings.platform_name.trim())
         setLogoUrl(data.settings.logo_url ?? null)
+        if (data.settings.footer_text?.trim()) setFooterNote(data.settings.footer_text.trim())
       })
       .catch(() => {
         /* decorative — the fallback name is shown */
       })
   }, [])
 
-  const isAdmin = user.role === 'admin'
-  const primaryNav = isAdmin ? ADMIN_NAV : USER_NAV
-
   const title = useMemo(() => VIEW_TITLES[view.name] ?? 'Muxamil.co', [view.name])
   const canGoBack = useAppStore((s) => s.history.length > 0)
 
   const badgeFor = (item: NavItem) =>
-    item.badge === 'notifications' ? unreadNotifications : item.badge === 'messages' ? unreadMessages : 0
+    item.badge === 'notifications'
+      ? unreadNotifications
+      : item.badge === 'messages'
+        ? unreadMessages
+        : item.badge === 'dm'
+          ? unreadDm
+          : item.badge === 'approvals'
+            ? pendingApprovals
+            : 0
 
-  const isActive = (item: NavItem) => view.name === item.view.name
+  const isActive = (item: NavItem) => {
+    if (view.name !== item.view.name) return false
+    if (view.name === 'admin-work-guideline' && item.view.name === 'admin-work-guideline') {
+      return view.section === item.view.section
+    }
+    return true
+  }
+
+  /** One mobile bottom-nav item (shared by every slot of the bottom bar). */
+  const mobileNavItem = (item: NavItem) => {
+    const badge = badgeFor(item)
+    const active = isActive(item)
+    const badgeTone = item.badge === 'approvals' ? 'bg-amber-500' : 'bg-primary'
+    return (
+      <button
+        key={item.label}
+        type="button"
+        onClick={() => navigate(item.view)}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          'relative flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-all duration-150 active:scale-90',
+          active ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
+        )}
+      >
+        <span className="relative flex items-center">
+          <item.icon className={cn('h-5 w-5 transition-transform duration-150', active && 'scale-110')} aria-hidden="true" />
+          {/* Tiny emerald dot under the active icon */}
+          <span
+            className={cn(
+              'absolute -bottom-1.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-primary transition-all duration-200',
+              active ? 'scale-100 opacity-100' : 'scale-0 opacity-0',
+            )}
+            aria-hidden="true"
+          />
+        </span>
+        <span className="truncate">{item.label.split(' ')[0]}</span>
+        {badge > 0 && (
+          <span className={cn('absolute right-3 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[9px] font-bold tabular-nums text-white shadow-sm', badgeTone)}>
+            {badge > 9 ? '9+' : badge}
+          </span>
+        )}
+      </button>
+    )
+  }
+
+  /** One nav button — shared by every nav surface (rail, sheet, bottom bar). */
+  const navButton = (item: NavItem, badgeTone: 'primary' | 'amber' = 'primary') => {
+    const badge = badgeFor(item)
+    const active = isActive(item)
+    return (
+      <button
+        key={item.label}
+        type="button"
+        onClick={() => navigate(item.view)}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          'group flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          active
+            ? 'bg-primary/10 font-semibold text-primary'
+            : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground',
+        )}
+      >
+        <item.icon
+          className={cn(
+            'h-[18px] w-[18px] shrink-0 transition-transform duration-150',
+            !active && 'group-hover:scale-110',
+          )}
+          aria-hidden="true"
+        />
+        <span className="flex-1 truncate text-left">{item.label}</span>
+        {badge > 0 && (
+          <span
+            className={cn(
+              'flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm',
+              badgeTone === 'amber' ? 'bg-amber-500' : 'bg-primary',
+            )}
+          >
+            {badge > 99 ? '99+' : badge}
+          </span>
+        )}
+      </button>
+    )
+  }
 
   const navList = (items: NavItem[]) => (
     <nav className="space-y-1" aria-label="Main navigation">
-      {items.map((item) => {
-        const badge = badgeFor(item)
-        const active = isActive(item)
-        return (
-          <button
-            key={item.label}
-            type="button"
-            onClick={() => navigate(item.view)}
-            aria-current={active ? 'page' : undefined}
-            className={cn(
-              'group flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              active
-                ? 'bg-primary/10 font-semibold text-primary'
-                : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground',
-            )}
-          >
-            <item.icon
-              className={cn(
-                'h-[18px] w-[18px] shrink-0 transition-transform duration-150',
-                !active && 'group-hover:scale-110',
-              )}
-              aria-hidden="true"
-            />
-            <span className="flex-1 truncate text-left">{item.label}</span>
-            {badge > 0 && (
-              <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-semibold tabular-nums text-primary-foreground shadow-sm">
-                {badge > 99 ? '99+' : badge}
-              </span>
-            )}
-          </button>
-        )
-      })}
+      {items.map((item) => navButton(item))}
     </nav>
   )
 
-  /** Sidebar body (brand → nav sections) shared by the desktop rail and the mobile sheet. */
-  const sidebarBody = (
+  /** Sidebar body — admin sees grouped sections; members keep their lists. */
+  const workGuidelineLink = (
+    <a
+      href="/work-guideline"
+      aria-label="Open Muxamil Work Hub: programs, tutorials, tasks and payments"
+      className="group relative mb-4 mt-2 block overflow-hidden rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-50 via-teal-50 to-primary/5 p-3.5 shadow-[0_14px_30px_-20px_rgba(16,185,129,0.35)] transition-all duration-200 hover:-translate-y-0.5 hover:border-emerald-500/45 hover:shadow-[0_18px_34px_-18px_rgba(16,185,129,0.45)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <span aria-hidden="true" className="pointer-events-none absolute -right-8 -top-10 h-28 w-28 rounded-full bg-emerald-400/15 blur-2xl" />
+      <span className="relative flex items-start gap-3">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-lg shadow-emerald-900/20 ring-1 ring-white/20">
+          <BookOpen className="h-5 w-5" aria-hidden="true" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-emerald-800">Muxamil Work Hub</span>
+            <span className="rounded-full border border-emerald-600/25 bg-emerald-100/80 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-800">Featured</span>
+          </span>
+          <span className="mt-1 block text-sm font-bold leading-snug text-sidebar-foreground">Find work. Learn. Earn.</span>
+          <span className="mt-1 block text-[11px] leading-relaxed text-sidebar-foreground/70">Tutorials, tasks, submissions &amp; payouts — all inside Muxamil.</span>
+          <span className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800">
+            Explore Work Hub <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" aria-hidden="true" />
+          </span>
+        </span>
+      </span>
+    </a>
+  )
+
+  const sidebarBody = isAdmin ? (
     <>
-      {navList(primaryNav)}
-      {!isAdmin && user.isVerified && (
+    <nav className="space-y-0" aria-label="Main navigation">
+      {ADMIN_NAV_GROUPS.map((group) => (
+        <div key={group.label}>
+          <SectionLabel>{group.label}</SectionLabel>
+          <div className="space-y-1">
+            {group.items.map((item) => navButton(item, item.badge === 'approvals' ? 'amber' : 'primary'))}
+          </div>
+        </div>
+      ))}
+    </nav>
+    </>
+  ) : (
+    <>
+      {workGuidelineLink}
+      {navList(USER_NAV)}
+      {user.isVerified && (
         <>
           <SectionLabel>Creator</SectionLabel>
           {navList([USER_NAV_SECONDARY[0]])}
         </>
       )}
-      <SectionLabel>{isAdmin ? 'Admin' : 'Account'}</SectionLabel>
-      {navList(isAdmin ? ADMIN_NAV_SECONDARY : USER_NAV_SECONDARY.slice(1))}
+      <SectionLabel>Account</SectionLabel>
+      {navList(USER_NAV_SECONDARY.slice(1))}
     </>
   )
 
@@ -260,6 +531,17 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
           <p className="truncate text-xs text-sidebar-foreground/60">@{user.username}</p>
         </div>
       </button>
+      {/* Quick hop back to the public website (admins only — members are
+          already on the member side). */}
+      {isAdmin && (
+        <button
+          type="button"
+          onClick={() => navigate({ name: 'explore' })}
+          className="mt-1 flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Compass className="h-[18px] w-[18px]" aria-hidden="true" /> View website
+        </button>
+      )}
       <button
         type="button"
         onClick={onLogout}
@@ -272,7 +554,8 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="flex min-h-screen bg-muted/30">
-      {/* Desktop sidebar — light, premium */}
+      {/* Desktop sidebar — light, premium (hidden while the immersive Store is active) */}
+      {!storeImmersive && (
       <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-3 px-5 pb-2 pt-6">
           <BrandMark logoUrl={logoUrl} platformName={platformName} />
@@ -285,21 +568,24 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <div className="flex-1 space-y-1 overflow-y-auto px-3 pb-4 scrollbar-thin">
-          <SectionLabel>Menu</SectionLabel>
+          {!isAdmin && <SectionLabel>Menu</SectionLabel>}
           {sidebarBody}
         </div>
 
         {/* Sidebar footer — user card */}
         <div className="border-t border-sidebar-border p-3 pt-3">{sidebarFooter}</div>
       </aside>
+      )}
 
       {/* Main column */}
       <div className="flex min-h-screen w-full min-w-0 flex-1 flex-col">
-        {/* Header */}
+        {/* Header (hidden while the immersive Store is active — the Store has
+            its own dynamic top navigation) */}
+        {!storeImmersive && (
         <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/70">
           <div className="mx-auto flex h-16 max-w-4xl items-center gap-1.5 px-3 sm:gap-2 sm:px-4">
             {/* Mobile menu (opens the sidebar sheet) */}
-            <Sheet>
+            <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
               <SheetTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 lg:hidden" aria-label="Open menu">
                   <Menu className="h-5 w-5" />
@@ -322,8 +608,24 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                     </span>
                   </span>
                 </SheetTitle>
+                {isAdmin && (
+                  <div className="px-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileNavOpen(false)
+                        setSearchOpen(true)
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-xl border border-sidebar-border bg-sidebar-accent/40 px-3 py-2.5 text-sm text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span className="flex-1 text-left">Search admin panel…</span>
+                      <kbd className="rounded border border-sidebar-border px-1.5 py-0.5 text-[10px] font-medium text-sidebar-foreground/50">⌘K</kbd>
+                    </button>
+                  </div>
+                )}
                 <div className="flex-1 space-y-1 overflow-y-auto px-3 pb-4 scrollbar-thin">
-                  <SectionLabel>Menu</SectionLabel>
+                  {!isAdmin && <SectionLabel>Menu</SectionLabel>}
                   {sidebarBody}
                 </div>
                 <div className="border-t border-sidebar-border p-3">{sidebarFooter}</div>
@@ -339,13 +641,29 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
 
             <h1 className="min-w-0 flex-1 truncate text-base font-semibold tracking-tight sm:text-lg">{title}</h1>
 
-            {/* Messages shortcut */}
+            {/* Admin quick-search (desktop header; drawer holds it on mobile) */}
+            {isAdmin && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="hidden h-9 shrink-0 gap-2 px-3 text-muted-foreground sm:flex"
+                onClick={() => setSearchOpen(true)}
+                aria-label="Search admin panel"
+              >
+                <Search className="h-4 w-4" aria-hidden="true" />
+                <span className="text-sm">Search</span>
+                <kbd className="pointer-events-none ml-1 rounded border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">⌘K</kbd>
+              </Button>
+            )}
+
+            {/* Support / messages shortcut — members: Admin Chat (the official
+                support channel); admins: the member-inbox console. */}
             <Button
               variant="ghost"
               size="icon"
               className="relative h-9 w-9 shrink-0"
               onClick={() => navigate(isAdmin ? { name: 'admin-messages' } : { name: 'chat' })}
-              aria-label={`Messages${unreadMessages ? `, ${unreadMessages} unread` : ''}`}
+              aria-label={`${isAdmin ? 'Messages' : 'Admin Chat'}${unreadMessages ? `, ${unreadMessages} unread` : ''}`}
             >
               <MessageSquare className="h-5 w-5" />
               {unreadMessages > 0 && (
@@ -399,6 +717,16 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                 <DropdownMenuItem onClick={() => navigate(isAdmin ? { name: 'admin-settings' } : { name: 'profile' })}>
                   <UserIcon className="mr-2 h-4 w-4" /> {isAdmin ? 'Admin profile' : 'My profile'}
                 </DropdownMenuItem>
+                {!isAdmin && (
+                  <DropdownMenuItem onClick={() => navigate({ name: 'my-orders' })}>
+                    <Package className="mr-2 h-4 w-4" /> My Orders
+                  </DropdownMenuItem>
+                )}
+                {isAdmin && (
+                  <DropdownMenuItem onClick={() => navigate({ name: 'explore' })}>
+                    <Compass className="mr-2 h-4 w-4" /> View website
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={() => navigate({ name: 'settings' })}>
                   <SettingsIcon className="mr-2 h-4 w-4" /> Settings
                 </DropdownMenuItem>
@@ -410,64 +738,75 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
             </DropdownMenu>
           </div>
         </header>
+        )}
 
-        {/* View content */}
-        <main className="mx-auto w-full max-w-4xl flex-1 px-3 pb-28 pt-5 sm:px-4 lg:pb-10" id="main-content">
+        {/* View content — the immersive Store manages its own full-width layout */}
+        <main
+          id="main-content"
+          className={
+            storeImmersive
+              ? 'w-full flex-1'
+              : view.name === 'admin-work-guideline'
+                ? 'mx-auto w-full max-w-7xl flex-1 px-3 pb-28 pt-5 sm:px-5 lg:pb-10'
+                : 'mx-auto w-full max-w-4xl flex-1 px-3 pb-28 pt-5 sm:px-4 lg:pb-10'
+          }
+        >
           <CurrentView />
         </main>
 
-        {/* Footer — sticks to the bottom, pushed down naturally on overflow */}
+        {/* Admin quick-search palette (Ctrl/Cmd+K) */}
+        {isAdmin && <AdminSearch open={searchOpen} onOpenChange={setSearchOpen} />}
+
+        {/* Footer — sticks to the bottom, pushed down naturally on overflow
+            (hidden while the immersive Store is active — it has its own) */}
+        {!storeImmersive && (
         <footer className="mt-auto hidden border-t bg-background py-4 lg:block">
           <div className="mx-auto flex max-w-4xl items-center justify-between px-4 text-xs text-muted-foreground">
-            <p>© {new Date().getFullYear()} {platformName} — a safe, moderated community platform.</p>
+            <p>© {new Date().getFullYear()} {platformName} — {footerNote}</p>
             <p className="flex items-center gap-1.5">
               <Radio className="h-3 w-3 text-primary" aria-hidden="true" /> Realtime connected
             </p>
           </div>
         </footer>
+        )}
       </div>
 
-      {/* Mobile bottom navigation */}
+      {/* Mobile bottom navigation — the immersive Store swaps in its own */}
+      {storeImmersive ? (
+        <StoreMobileNav />
+      ) : (
       <nav
         className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 backdrop-blur lg:hidden"
         aria-label="Primary"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        <div className="mx-auto grid h-16 max-w-md grid-cols-5">
-          {primaryNav.slice(0, 4).map((item) => {
-            const badge = badgeFor(item)
-            const active = isActive(item)
-            return (
-              <button
-                key={item.label}
-                type="button"
-                onClick={() => navigate(item.view)}
-                aria-current={active ? 'page' : undefined}
-                className={cn(
-                  'relative flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-all duration-150 active:scale-90',
-                  active ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
-                )}
+        <div className={cn('mx-auto grid h-16 max-w-md', isAdmin ? 'grid-cols-5' : 'grid-cols-6')}>
+          {(isAdmin ? ADMIN_MOBILE_NAV : MEMBER_MOBILE_NAV.slice(0, 2)).map(mobileNavItem)}
+
+          {/* Floating circular "M" — one-tap access to the Store (members
+              only; raised above the bar with a soft brand-tinted shadow). */}
+          {!isAdmin && (
+            <button
+              type="button"
+              onClick={() => navigate({ name: 'store' })}
+              aria-label="Open the Store"
+              className="relative flex flex-col items-center justify-end gap-1 pb-1.5 text-[10px] font-medium text-muted-foreground transition-all duration-150 hover:text-foreground active:scale-90"
+            >
+              <span
+                className="absolute -top-3 left-1/2 flex h-12 w-12 -translate-x-1/2 items-center justify-center rounded-full border border-primary/40 bg-gradient-to-br from-primary to-primary/80 text-lg font-black tracking-tight text-primary-foreground shadow-lg shadow-primary/50"
+                aria-hidden="true"
               >
-                <span className="relative flex items-center">
-                  <item.icon className={cn('h-5 w-5 transition-transform duration-150', active && 'scale-110')} aria-hidden="true" />
-                  {/* Tiny emerald dot under the active icon */}
-                  <span
-                    className={cn(
-                      'absolute -bottom-1.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-primary transition-all duration-200',
-                      active ? 'scale-100 opacity-100' : 'scale-0 opacity-0',
-                    )}
-                    aria-hidden="true"
-                  />
-                </span>
-                <span className="truncate">{item.label.split(' ')[0]}</span>
-                {badge > 0 && (
-                  <span className="absolute right-3 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-bold tabular-nums text-primary-foreground shadow-sm">
-                    {badge > 9 ? '9+' : badge}
-                  </span>
+                {logoUrl ? (
+                  <img src={logoUrl} alt="" className="h-7 w-7 rounded-full object-cover" />
+                ) : (
+                  'M'
                 )}
-              </button>
-            )
-          })}
+              </span>
+              <span className="text-muted-foreground">Store</span>
+            </button>
+          )}
+
+          {(isAdmin ? [] : MEMBER_MOBILE_NAV.slice(2, 4)).map(mobileNavItem)}
           <button
             type="button"
             onClick={() => navigate(isAdmin ? { name: 'admin-settings' } : { name: 'profile' })}
@@ -487,6 +826,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
           </button>
         </div>
       </nav>
+      )}
     </div>
   )
 }
@@ -505,6 +845,8 @@ function CurrentView() {
       return <FeedView />
     case 'explore':
       return <ExploreView initialCategory={view.categorySlug} initialQuery={view.q} />
+    case 'categories':
+      return <CategoriesView />
     case 'people':
       return <PeopleView />
     case 'saved':
@@ -512,13 +854,31 @@ function CurrentView() {
     case 'notifications':
       return <NotificationsView />
     case 'chat':
-      return <ChatView />
+      return <ChatView orderContext={view.orderContext} />
+    case 'dm':
+      return <DmView initialConversationId={view.conversationId} />
     case 'profile':
       return <ProfileView />
     case 'user':
       return <UserProfileView userId={view.userId} />
+    case 'following':
+      return <FollowingView userId={view.userId} />
     case 'community':
       return <CommunityView communityId={view.communityId} />
+    case 'category':
+      return <CategoryView categorySlug={view.categorySlug} />
+    case 'projects':
+      return <ProjectsView />
+    case 'project':
+      return <ProjectView projectSlug={view.projectSlug} />
+    case 'store':
+      return <StoreView />
+    case 'product':
+      return <ProductView productSlug={view.productSlug} />
+    case 'checkout':
+      return <CheckoutView orderId={view.orderId} />
+    case 'my-orders':
+      return <MyOrdersView />
     case 'my-community':
       return <MyCommunityView />
     case 'settings':
@@ -526,13 +886,19 @@ function CurrentView() {
     case 'admin-dashboard':
       return <AdminDashboard />
     case 'admin-users':
-      return <AdminUsers />
+      return <AdminUsers initialFilter={view.filter} />
     case 'admin-posts':
       return <AdminPosts />
     case 'admin-categories':
       return <AdminCategories />
+    case 'admin-projects':
+      return <AdminProjects />
+    case 'admin-store':
+      return <AdminStore initialSection={view.section} />
     case 'admin-analytics':
       return <AdminAnalytics />
+    case 'admin-moderation':
+      return <AdminModeration />
     case 'admin-links':
       return <AdminLinks />
     case 'admin-approvals':
@@ -540,9 +906,11 @@ function CurrentView() {
     case 'admin-communities':
       return <AdminCommunities />
     case 'admin-messages':
-      return <AdminMessages initialConversationId={view.conversationId} />
+      return <AdminMessages initialConversationId={view.conversationId} initialUserId={view.userId} />
     case 'admin-settings':
-      return <AdminSettings />
+      return <AdminSettings initialSection={view.section} />
+    case 'admin-work-guideline':
+      return <AdminWorkGuideline section={view.section} />
     default:
       return <FeedView />
   }

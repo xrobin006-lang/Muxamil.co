@@ -1,0 +1,484 @@
+// Muxamil.co — Digital Rewards Platform schema
+// Work Guideline data lives in namespaced PostgreSQL tables in the existing Muxamil Supabase project.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/wg-prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("WORK_GUIDELINE_DATABASE_URL")
+  directUrl = env("WORK_GUIDELINE_DIRECT_URL")
+}
+
+// Accounts & authentication
+// -----------------------------------------------------------------------------
+// Credentials and sessions live in the project's Supabase Auth service; this
+// table is the local profile row (role, restriction, display name) linked to
+// the Supabase identity via supabaseUserId. Roles are only ever read
+// server-side from this row.
+
+model User {
+  id              String    @id @default(cuid())
+  supabaseUserId  String?   @unique // auth.users.id in the Supabase project
+  email           String    @unique
+  name            String
+  role            String    @default("USER") // USER | ADMIN (validated server-side only)
+  isRestricted    Boolean   @default(false)
+  emailVerifiedAt DateTime? // mirrors Supabase email confirmation
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  submissions    Submission[]
+  notifications  Notification[]
+  auditLogs      AdminAuditLog[]     @relation("AuditAdmin")
+  contactMessage ContactMessage[]
+  tutorialProgress TutorialProgress[]
+
+  @@map("wg_users")
+}
+
+// ---------------------------------------------------------------------------
+// Rewards programs & tutorials
+// ---------------------------------------------------------------------------
+
+model RewardsProgram {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  name          String
+  shortName     String   @default("")
+  description   String
+  instructions  String   @default("")
+  requirements  String   @default("[]")    // JSON array of strings
+  paymentMethods String  @default("[]")    // JSON array of {id,label,accountLabel,hint}
+  requiresCode  Boolean  @default(true)
+  icon          String   @default("gift")  // lucide icon key rendered by the frontend
+  accent        String   @default("violet")
+  // Admin-controlled action-button labels (empty string = platform default:
+  // "Watch Tutorials" / "Submit Your Card" — Gmail ships "Submit Your Gmail").
+  tutorialCtaLabel String @default("")
+  submitCtaLabel   String @default("")
+  // Admin-managed button behavior (Program Card customization):
+  //   tutorialCtaUrl — destination for the "Watch Tutorials" button. Empty =
+  //     the program's in-site tutorial page; a full http(s) URL opens that
+  //     destination in a new tab (e.g. a YouTube playlist).
+  //   showTutorialCta / showSubmitCta — per-button visibility on program
+  //     cards and the program page (an admin can hide the Learn or Earn
+  //     action without touching anything else).
+  tutorialCtaUrl  String @default("")
+  showTutorialCta Boolean @default(true)
+  showSubmitCta   Boolean @default(true)
+  isActive      Boolean  @default(true)
+  displayOrder  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  steps       TutorialStep[]
+  submissions Submission[]
+  tutorialProgress TutorialProgress[]
+  cardRates   CardRate[]
+  guide       ProgramGuide?
+
+  @@map("wg_rewards_programs")
+}
+
+// ---------------------------------------------------------------------------
+// Program guides — admin-published rich notes for each rewards program
+// -----------------------------------------------------------------------------
+// ONE guide per program (programId is unique), so re-saving or republishing an
+// existing guide always UPDATES the same row — duplicate guide records are
+// impossible at the database level. `content` stores the administrator's raw
+// text VERBATIM (wording, spelling, punctuation, emojis, URL parameters are
+// never rewritten or translated) so the editor can re-edit the exact source
+// later; presentation (headings, bold, lists, links, direction) is derived at
+// render time by the safe renderer — raw text is the single source of truth.
+// status: "DRAFT" (invisible to members) | "PUBLISHED" (member-facing).
+// Drafts and unpublished guides are only ever served through the admin API.
+
+model ProgramGuide {
+  id          String        @id @default(cuid())
+  programId   String        @unique
+  program     RewardsProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  content     String        @default("")
+  status      String        @default("DRAFT") // DRAFT | PUBLISHED (validated server-side)
+  publishedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([status])
+
+  @@map("wg_program_guides")
+}
+
+// ---------------------------------------------------------------------------
+// Card rates — the admin-managed "Latest Card Rates" catalog
+// -----------------------------------------------------------------------------
+// Each entry tells members which card is currently accepted and its payout
+// ("Shopping Card — PKR 500"). The admin adds unlimited entries without code
+// changes; every field below is admin-controlled. programId is OPTIONAL:
+//   • set    → the card is offered in that program's submission flow
+//   • unset  → a global card, reachable from Latest Card Rates only
+// Submissions snapshot the card NAME (cardName) so history stays readable
+// even after a card is renamed or deleted; the amount/currency are copied
+// onto the submission at creation time and never silently re-interpreted.
+
+model CardRate {
+  id           String   @id @default(cuid())
+  code         String   @unique // "shopping-card" — stable identifier used by URLs/APIs
+  name         String // "Shopping Card"
+  description  String   @default("") // short member-facing description
+  category     String   @default("") // e.g. "Shopping", "Gaming" (optional)
+  region       String   @default("") // e.g. "Pakistan", "US" (optional)
+  rate         Float // current payout amount for this card
+  currency     String   @default("PKR") // validated against the enabled Currency set
+  minValue     Float? // optional minimum card value
+  maxValue     Float? // optional maximum card value
+  badge        String   @default("") // custom badge, e.g. "Hot", "New"
+  notes        String   @default("") // optional member-facing notes/instructions
+  logoPath     String   @default("") // card image (private storage, public display asset)
+  bannerPath   String   @default("") // optional banner
+  programId    String? // optional association — null = global card
+  program      RewardsProgram? @relation(fields: [programId], references: [id], onDelete: SetNull)
+  isActive     Boolean  @default(true)
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt // drives the "Updated recently" indicator
+
+  submissions Submission[]
+
+  @@index([isActive, displayOrder])
+  @@index([programId])
+
+  @@map("wg_card_rates")
+}
+
+// ---------------------------------------------------------------------------
+// Global currency configuration (admin-managed)
+// -----------------------------------------------------------------------------
+// One row per supported currency. The DEFAULT currency (isDefault) drives
+// every new submission/payment amount, and the per-currency decimals/symbol
+// drive display formatting platform-wide ("PKR 1,000"). Financial records
+// always store their own currency code + amount — changing the platform
+// default NEVER rewrites historical transactions.
+
+model Currency {
+  code          String   @id // ISO-style code, e.g. "PKR", "USD", "USDT"
+  name          String // "Pakistani Rupee"
+  symbol        String   @default("") // optional short symbol, e.g. "Rs"
+  decimals      Int      @default(0) // display precision
+  isEnabled     Boolean  @default(true)
+  isDefault     Boolean  @default(false)
+  displayOrder  Int      @default(0)
+  // OPTIONAL admin-managed conversion rate: 1 unit of this currency equals
+  // rateToDefault units of the platform's default currency. Null = no managed
+  // rate (no conversion display — rates are NEVER invented).
+  rateToDefault Float?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("wg_currencies")
+}
+
+// ---------------------------------------------------------------------------
+// Platform payment methods (admin-managed, member-facing)
+// -----------------------------------------------------------------------------
+// Centralized payout methods (JazzCash, Easypaisa, NayaPay, …) with branding
+// and the platform's official payout account shown to members for
+// transparency. Members pick one in Step 2 and provide their own account
+// number — the fields below describe the METHOD, not the member's account.
+
+model PaymentMethod {
+  id                 String   @id @default(cuid())
+  code               String   @unique // "jazzcash" — stable identifier used by submissions
+  name               String // "JazzCash"
+  description        String   @default("") // short member-facing description
+  instructions       String   @default("") // payment instructions shown after selection
+  // The platform's official payout account (displayed to members so they can
+  // recognize the sender; NOT the member's account).
+  accountHolderName  String   @default("")
+  accountNumber      String   @default("") // wallet number / IBAN as applicable
+  kind               String   @default("mobile") // "mobile" (PK 03XX) | "generic" (free-form)
+  accountLabel       String   @default("") // label for the member's account field
+  accountNameLabel   String   @default("Account holder name")
+  requiresAccountName Boolean @default(true)
+  minPayout          Float? // optional minimum payout amount (default currency)
+  maxPayout          Float? // optional maximum payout amount (default currency)
+  logoPath           String   @default("") // private storage key (public display asset)
+  bannerPath         String   @default("") // optional banner shown when selected
+  isEnabled          Boolean  @default(true)
+  displayOrder       Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@map("wg_payment_methods")
+}
+
+model TutorialStep {
+  id           String   @id @default(cuid())
+  programId    String
+  program      RewardsProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  stepNumber   Int
+  title        String
+  description  String   @default("")
+  videoUrl     String   @default("") // uploaded file token or approved provider URL (e.g. YouTube)
+  thumbnailUrl String   @default("")
+  // ---- Automatic video aspect-ratio configuration ----
+  // aspectRatio is the ADMIN setting: "auto" (default — use the detected
+  // ratio, falling back to URL-type heuristics) or a manual override such as
+  // "9:16", "16:9", "1:1", "4:5", "4:3", "3:2", "5:4", "21:9", "2:1".
+  // detectedWidth/detectedHeight/detectedSource cache the server-side
+  // metadata detection (true pixel dimensions) performed when the URL is
+  // saved, so the member-facing player renders the ORIGINAL aspect ratio
+  // with zero runtime network dependency. Cache is refreshed whenever the
+  // video URL changes (never on title/description-only edits).
+  aspectRatio    String   @default("auto")
+  detectedWidth  Int      @default(0)  // 0 = not detected / unavailable
+  detectedHeight Int      @default(0)
+  detectedSource String   @default("") // "youtube_data_api" | "youtube_thumbnail" | "youtube_oembed" | "vimeo_oembed" | ""
+  isPublished  Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([programId, stepNumber])
+
+  @@map("wg_tutorial_steps")
+}
+
+// Server-side tutorial progress. Persists across devices/browsers: a step is
+// "opened" when the user views it and "completed" only through an explicit
+// user action (Next / Finish) — we never infer full playback without evidence.
+model TutorialProgress {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  programId   String
+  program     RewardsProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  stepNumber  Int
+  openedAt    DateTime @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, programId, stepNumber])
+  @@index([userId, programId])
+
+  @@map("wg_tutorial_progress")
+}
+
+// ---------------------------------------------------------------------------
+// Submissions & verification workflow
+// ---------------------------------------------------------------------------
+// Submission kinds:
+//   "CARD" (default) — the card submission wizard (screenshot + redemption
+//                      code); every pre-existing row is a CARD.
+//   "GMAIL"          — the Gmail Rewards wizard (integrated entry checker,
+//                      no screenshot). The member pastes their Gmail addresses
+//                      (one per line, "example@gmail.com" — passwords are
+//                      never requested and never accepted); the server parses
+//                      and eligibility-checks them, stores the eligible list
+//                      in gmailEntries (sensitive — admin-only exposure, exactly
+//                      like redemptionCode) and the parse statistics in the
+//                      count columns below. A per-user daily submission limit
+//                      (SiteSetting gmail_daily_limit) governs how many
+//                      distinct eligible addresses may be accepted per day;
+//                      the counter resets at local midnight in the configured
+//                      timezone (gmail_daily_reset_timezone). Eligibility is
+//                      NEVER verification — only an administrator's review
+//                      accepts entries for payment. Pre-upgrade rows carry
+//                      legacy SELF-REPORTED counts and no gmailEntries (null =
+//                      legacy row); early entries-based rows may still contain
+//                      the retired email:password format (created before the
+//                      password requirement was removed).
+model Submission {
+  id              String   @id @default(cuid())
+  referenceId     String   @unique // e.g. WG-7GK3Q9 (new) / MXC-7GK3Q9 (legacy)
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  // "CARD" | "GMAIL" — which submission wizard created the record. Legacy rows
+  // default to "CARD". Drives member/admin display + gmail-specific validation.
+  submissionKind  String   @default("CARD")
+  // Optional since the card-rates upgrade: global cards (no program) create
+  // program-less submissions. Legacy submissions always keep their program.
+  programId       String?
+  program         RewardsProgram? @relation(fields: [programId], references: [id], onDelete: SetNull)
+  // The card-rate entry this submission was created from (null = legacy
+  // free-amount submission). Historical amounts/currencies are ALWAYS the
+  // values snapshot below — never re-read from a later card-rate edit.
+  cardRateId      String?
+  cardRate        CardRate? @relation(fields: [cardRateId], references: [id], onDelete: SetNull)
+  cardName        String   @default("") // display snapshot ("Shopping Card") — survives card deletion
+  amount          Float
+  currency        String   @default("USD")
+  // Nullable since the Gmail flow: gmail submissions carry checker COUNTS
+  // instead of a screenshot (hasScreenshot already guards all consumers).
+  screenshotPath  String?  // private storage key (never publicly served)
+  // Gmail Rewards — checker results (nullable for CARD rows). Integrated
+  // checker semantics (gmailEntries != null): pasted = non-empty lines the
+  // member pasted, valid = entries that passed the eligibility check,
+  // invalid = lines removed (bad format), unverified = lines removed as
+  // duplicates (in-paste or previously submitted), quantity = entries
+  // actually submitted. Legacy rows (gmailEntries == null) keep their old
+  // self-reported meanings.
+  gmailTotalChecked Int? // total entries the member ran through the checker
+  gmailValid        Int? // checker-reported valid/live results
+  gmailInvalid      Int? // checker-reported invalid/dead results
+  gmailUnverified   Int? // checker-reported unverified/error results
+  gmailQuantity     Int? // quantity proposed for submission (≤ valid, ≥ minimum)
+  // The eligible entries the member actually submitted, one Gmail address
+  // ("example@gmail.com") per line — SENSITIVE: stored server-side only,
+  // exposed exclusively to administrators (same policy as redemptionCode).
+  // Null on card rows and legacy count-based Gmail rows. Early entries-based
+  // rows created before passwords were removed may contain the retired
+  // "email:password" form (the address is the text before the first colon).
+  gmailEntries     String?
+  redemptionCode  String   @default("") // sensitive — admin-only exposure
+  // ---- Administrator review & payment-management upgrade ----
+  // memberNote: a MEMBER-VISIBLE administrator note ("40 of 50 entries accepted,
+  // payment adjusted…"). Separate from adminNotes (internal, never exposed).
+  memberNote      String   @default("")
+  // Gmail batch review — per-entry decisions recorded by an administrator.
+  // gmailReview stores JSON [{email,status:"accepted"|"rejected",reason}];
+  // gmailAccepted/gmailRejected are the derived counts (null = not reviewed).
+  gmailAccepted   Int?
+  gmailRejected   Int?
+  gmailReview     String?
+  // Rate per eligible entry snapshotted at submission time (currency above);
+  // null on legacy rows → derived as amount/gmailQuantity when needed.
+  gmailRatePerEntry Float?
+  // The reviewed eligible payout amount (gmail: accepted × rate; card: admin
+  // adjustment). null = not yet reviewed → consumers fall back to `amount`.
+  // Payment installments and the outstanding balance settle against THIS.
+  eligibleAmount  Float?
+  // Step 2 — payment account details (Pakistani mobile wallets). Empty until
+  // the user completes "Where should we send your payment?".
+  paymentMethod   String   @default("") // e.g. Easypaisa | JazzCash | UPaisa
+  paymentAccount  String   @default("") // sensitive — masked for non-owners
+  paymentAccountName String @default("") // account holder name (as printed)
+  paymentDetailsAt DateTime? // server timestamp when Step 2 was saved
+  notes           String   @default("")
+  status          String   @default("AWAITING_PAYMENT_DETAILS") // AWAITING_PAYMENT_DETAILS until Step 2 is saved
+  adminNotes      String   @default("") // internal, admin-only
+  rejectionReason String   @default("")
+  idempotencyKey  String?  // client retry token — a slow-response retry returns the original record, never a duplicate
+  createdAt       DateTime @default(now()) // server-generated — Step 1 completion
+  deadlineAt      DateTime? // set ONLY when payment details are saved (Step 2) — server-generated, never client-controlled
+  updatedAt       DateTime @updatedAt
+
+  statusHistory SubmissionStatusHistory[]
+  // Multiple payment records per submission are allowed — full payouts AND
+  // partial installments. The submission reaches PAID only when the sum of
+  // COMPLETED installments covers the eligible amount (server-enforced).
+  payments      PaymentRecord[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@index([status])
+  @@index([programId])
+  @@index([deadlineAt])
+
+  @@map("wg_submissions")
+}
+
+model SubmissionStatusHistory {
+  id              String     @id @default(cuid())
+  submissionId    String
+  submission      Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  fromStatus      String?
+  toStatus        String
+  changedByUserId String?
+  changedByName   String     @default("System")
+  note            String     @default("")
+  createdAt       DateTime   @default(now())
+
+  @@index([submissionId])
+
+  @@map("wg_submission_status_history")
+}
+
+model PaymentRecord {
+  id             String     @id @default(cuid())
+  // NOT unique — a submission may carry several installment payments (e.g. 40
+  // accepted Gmail entries paid in two transfers). Exactly one row may be
+  // in-flight (PROCESSING) at a time; the API upserts that row so form retries
+  // can never create duplicates. COMPLETED rows are immutable (corrections go
+  // through the FAILED/REVERSED PATCH path).
+  submissionId   String
+  submission     Submission @relation(fields: [submissionId], references: [id])
+  paymentRef     String     @unique // public payment reference, e.g. PAY-7GK3Q9
+  // The ACTUAL amount the administrator recorded as paid (never inferred from
+  // the submission value) plus its currency, chosen at record time.
+  amountPaid     Float      @default(0)
+  currency       String     @default("USD")
+  method         String
+  transactionRef String     @default("")
+  proofPath      String     @default("") // private storage key
+  // PROCESSING | COMPLETED | FAILED | REVERSED — validated server-side.
+  // A submission is only marked PAID when a payment reaches COMPLETED.
+  status         String     @default("PROCESSING")
+  paidAt         DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+
+  @@map("wg_payment_records")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications, settings, audit & support
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   @default("INFO")
+  title     String
+  message   String
+  link      String   @default("")
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+
+  @@map("wg_notifications")
+}
+
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("wg_site_settings")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String?
+  admin      User?    @relation("AuditAdmin", fields: [adminId], references: [id])
+  adminName  String   @default("")
+  action     String
+  targetType String   @default("")
+  targetId   String   @default("")
+  details    String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+
+  @@map("wg_admin_audit_logs")
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  name      String
+  email     String
+  subject   String   @default("")
+  message   String
+  isHandled Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("wg_contact_messages")
+}

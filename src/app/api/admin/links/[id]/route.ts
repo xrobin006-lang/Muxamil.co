@@ -37,7 +37,7 @@ async function fetchCta(id: string): Promise<CtaRow | null> {
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { id } = await ctx.params
     const prev = await fetchCta(id)
@@ -99,7 +99,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { id } = await ctx.params
     const prev = await fetchCta(id)

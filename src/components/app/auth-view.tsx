@@ -6,11 +6,11 @@ import { ArrowLeft, Eye, EyeOff, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { apiGet, apiJson, setSessionToken } from '@/lib/api-client'
+import { apiGet, apiJson } from '@/lib/api-client'
 import { useAppStore, defaultViewFor } from '@/stores/app-store'
 import type { PublicSettings, SessionUser } from '@/lib/types'
 
-type AuthResponse = { user: SessionUser; sessionToken?: string }
+type AuthResponse = { user: SessionUser }
 type SettingsResponse = { settings: PublicSettings }
 
 export default function AuthView({
@@ -59,10 +59,6 @@ export default function AuthView({
       const payload =
         mode === 'login' ? { email, password } : { email, password, fullName, username }
       const data = await apiJson<AuthResponse>(`/api/auth/${mode}`, 'POST', payload)
-      // Store the echoed session token FIRST so the Bearer fallback is
-      // active for the immediate badge-hydration call below when the browser
-      // blocked the session cookie (cross-site preview iframe).
-      if (data.sessionToken) setSessionToken(data.sessionToken)
       setUser(data.user)
       // Hydrate the real unread badges (and maintenance flag) right away —
       // the mount-time /api/auth/me fetch ran before the session existed.
@@ -76,6 +72,18 @@ export default function AuthView({
         })
         .catch(() => {})
       toast.success(mode === 'login' ? `Welcome back, ${data.user.fullName.split(' ')[0]}!` : 'Account created — welcome!')
+      const requestedReturnTo = new URLSearchParams(window.location.search).get('returnTo')
+      if (requestedReturnTo && requestedReturnTo.startsWith('/') && !requestedReturnTo.startsWith('//') && !requestedReturnTo.includes('\\')) {
+        try {
+          const target = new URL(requestedReturnTo, window.location.origin)
+          if (target.origin === window.location.origin) {
+            window.location.replace(`${target.pathname}${target.search}${target.hash}`)
+            return
+          }
+        } catch {
+          // Ignore malformed return URLs and continue to the normal Muxamil view.
+        }
+      }
       navigate(defaultViewFor(data.user))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Something went wrong. Please try again.')

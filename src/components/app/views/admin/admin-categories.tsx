@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   Plus,
@@ -11,6 +11,12 @@ import {
   ChevronDown,
   Loader2,
   AlertTriangle,
+  RefreshCw,
+  ImagePlus,
+  LayoutGrid,
+  ListOrdered,
+  GripVertical,
+  FolderKanban,
   Shapes,
   Smartphone,
   Globe,
@@ -28,6 +34,7 @@ import {
   Gift,
   TrendingUp,
   BookOpen,
+  Store as StoreIcon,
   type LucideIcon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -62,7 +69,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { apiGet, apiJson } from '@/lib/api-client'
+import { apiGet, apiJson, csrfHeaders } from '@/lib/api-client'
+import { useSocketEvent } from '@/hooks/use-realtime'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '../../components/empty-state'
 
@@ -77,9 +85,46 @@ type AdminCategory = {
   sortOrder: number
   isActive: boolean
   postsCount?: number
+  /** Explore card banner URL (SPEC-3) — null when no banner uploaded. */
+  banner_url?: string | null
 }
 
 type CategoriesResponse = { categories: AdminCategory[] }
+type ExploreLayoutResponse = { perRow: number; moreThreshold: number; sectionOrder?: unknown }
+
+/** The reorderable Explore browse sections (mirrors EXPLORE_SECTIONS server-side). */
+const EXPLORE_SECTION_META: { id: string; label: string; icon: LucideIcon }[] = [
+  { id: 'store', label: 'Store', icon: StoreIcon },
+  { id: 'categories', label: 'Categories', icon: LayoutGrid },
+  { id: 'projects', label: 'Projects', icon: FolderKanban },
+]
+const DEFAULT_SECTION_ORDER = EXPLORE_SECTION_META.map((s) => s.id)
+
+/**
+ * Tolerant section-order parser (mirror of the server's): keeps recognized
+ * ids in the given order, drops unknown/duplicate ids, appends missing
+ * sections in default order — always a complete permutation.
+ */
+function normalizeSectionOrder(raw: unknown): string[] {
+  const known = new Set<string>(DEFAULT_SECTION_ORDER)
+  const seen = new Set<string>()
+  const order: string[] = []
+  if (Array.isArray(raw)) {
+    for (const value of raw) {
+      if (typeof value === 'string' && known.has(value) && !seen.has(value)) {
+        seen.add(value)
+        order.push(value)
+      }
+    }
+  }
+  for (const id of DEFAULT_SECTION_ORDER) {
+    if (!seen.has(id)) order.push(id)
+  }
+  return order
+}
+
+const BANNER_MAX_BYTES = 4 * 1024 * 1024
+const BANNER_ACCEPT = 'image/jpeg,image/png,image/webp'
 
 /** ~10 curated presets — no blue/indigo accents (platform palette rule). */
 const COLOR_PRESETS = [
@@ -143,12 +188,101 @@ function CategoryIcon({ name, className }: { name: string | null; className?: st
   return <Icon className={className} aria-hidden="true" />
 }
 
+/** "r, g, b" from a 3/6-digit hex, or null (admin color column is free-text). */
+function hexToRgb(hex: string | null | undefined): string | null {
+  if (!hex) return null
+  const m = hex.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i)
+  if (!m) return null
+  let h = m[1]
+  if (h.length === 3) h = [...h].map((ch) => ch + ch).join('')
+  return `${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)}`
+}
+
+/** Small banner preview — uploaded image, or the category-color gradient tile. */
+function BannerPreview({ category, className }: { category: AdminCategory; className?: string }) {
+  if (category.banner_url) {
+    return (
+      <img
+        src={category.banner_url}
+        alt={`${category.name} banner`}
+        className={cn('rounded-md object-cover', className)}
+      />
+    )
+  }
+  const rgb = hexToRgb(category.color)
+  const gradient = rgb
+    ? { background: `linear-gradient(135deg, rgba(${rgb}, 0.3), rgba(${rgb}, 0.08))` }
+    : undefined
+  return (
+    <div
+      className={cn(
+        'flex items-center justify-center rounded-md border border-dashed bg-muted',
+        className,
+      )}
+      style={gradient}
+      aria-hidden="true"
+    >
+      <CategoryIcon name={category.icon} className="h-4 w-4 text-muted-foreground" />
+    </div>
+  )
+}
+
+/** Multipart upload — the banner endpoint expects a raw FormData body. */
+async function postBannerFile(
+  categoryId: string,
+  file: File,
+): Promise<{ banner: { url: string; path: string } }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/admin/categories/${categoryId}/banner`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+    headers: csrfHeaders(),
+  })
+  const text = await res.text()
+  let data: unknown = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = null
+  }
+  if (!res.ok) {
+    const message =
+      data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : 'Upload failed.'
+    throw new Error(message)
+  }
+  return data as { banner: { url: string; path: string } }
+}
+
 export default function AdminCategories() {
   const [categories, setCategories] = useState<AdminCategory[]>([])
   const [loading, setLoading] = useState(true)
   const [loadFailed, setLoadFailed] = useState(false)
   const [movingId, setMovingId] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
+
+  // Explore grid layout (SPEC-3) — perRow / moreThreshold number inputs.
+  const [perRowInput, setPerRowInput] = useState('3')
+  const [thresholdInput, setThresholdInput] = useState('6')
+  const [layoutLoading, setLayoutLoading] = useState(true)
+  const [layoutFailed, setLayoutFailed] = useState(false)
+  const [layoutSaving, setLayoutSaving] = useState(false)
+
+  // Explore section order — which of Store / Categories / Projects renders
+  // first on the public Explore page (admin-controlled, saved separately).
+  const [sectionOrder, setSectionOrder] = useState<string[]>(DEFAULT_SECTION_ORDER)
+  const [savedSectionOrder, setSavedSectionOrder] = useState<string[]>(DEFAULT_SECTION_ORDER)
+  const [orderSaving, setOrderSaving] = useState(false)
+
+  // Per-category banner controls (SPEC-3).
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploadTarget, setUploadTarget] = useState<AdminCategory | null>(null)
+  const [uploadingId, setUploadingId] = useState<string | null>(null)
+  const [bannerRemoveTarget, setBannerRemoveTarget] = useState<AdminCategory | null>(null)
+  const [removingBanner, setRemovingBanner] = useState(false)
 
   // Create / edit dialog state
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -185,6 +319,135 @@ export default function AdminCategories() {
   useEffect(() => {
     load()
   }, [load])
+
+  const loadLayout = useCallback(async (silent = false) => {
+    try {
+      const data = await apiGet<ExploreLayoutResponse>('/api/admin/explore-layout')
+      setPerRowInput(String(data.perRow))
+      setThresholdInput(String(data.moreThreshold))
+      const order = normalizeSectionOrder(data.sectionOrder)
+      setSectionOrder(order)
+      setSavedSectionOrder(order)
+      setLayoutFailed(false)
+    } catch (err) {
+      setLayoutFailed(true)
+      if (!silent) toast.error(err instanceof Error ? err.message : 'Could not load the explore layout.')
+    } finally {
+      setLayoutLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadLayout()
+  }, [loadLayout])
+
+  // Live refresh when another admin changes categories/banners/layout.
+  useSocketEvent('categories:changed', () => {
+    load(true)
+    void loadLayout(true)
+  })
+
+  const saveLayout = async () => {
+    if (layoutSaving) return
+    const perRow = parseInt(perRowInput, 10)
+    const moreThreshold = parseInt(thresholdInput, 10)
+    if (Number.isNaN(perRow) || perRow < 1 || perRow > 6) {
+      toast.error('Categories per row must be between 1 and 6.')
+      return
+    }
+    if (Number.isNaN(moreThreshold) || moreThreshold < 3 || moreThreshold > 24) {
+      toast.error('Show before More must be between 3 and 24.')
+      return
+    }
+    setLayoutSaving(true)
+    try {
+      await apiJson('/api/admin/explore-layout', 'PATCH', { perRow, moreThreshold })
+      toast.success('Explore layout saved.')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the explore layout.')
+    } finally {
+      setLayoutSaving(false)
+    }
+  }
+
+  // ---- Explore section order (↑ / ↓ + Save order) --------------------------
+
+  const moveSection = (index: number, direction: -1 | 1) => {
+    setSectionOrder((prev) => {
+      const target = index + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  const orderDirty = sectionOrder.join('\u0000') !== savedSectionOrder.join('\u0000')
+
+  const saveSectionOrder = async () => {
+    if (orderSaving || !orderDirty) return
+    setOrderSaving(true)
+    try {
+      await apiJson('/api/admin/explore-layout', 'PATCH', { sectionOrder })
+      setSavedSectionOrder(sectionOrder)
+      toast.success('Explore section order saved.')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the section order.')
+    } finally {
+      setOrderSaving(false)
+    }
+  }
+
+  const pickBanner = (cat: AdminCategory) => {
+    if (uploadingId) return
+    setUploadTarget(cat)
+    fileInputRef.current?.click()
+  }
+
+  const uploadBanner = async (cat: AdminCategory, file: File) => {
+    if (file.size > BANNER_MAX_BYTES) {
+      toast.error('Banner images must be 4MB or smaller.')
+      return
+    }
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
+      toast.error('Banners must be JPEG, PNG, or WebP images.')
+      return
+    }
+    setUploadingId(cat.id)
+    try {
+      await postBannerFile(cat.id, file)
+      toast.success(`Banner updated for “${cat.name}”.`)
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not upload the banner.')
+    } finally {
+      setUploadingId(null)
+      setUploadTarget(null)
+    }
+  }
+
+  const onBannerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // Reset so picking the same file again re-triggers onChange.
+    e.target.value = ''
+    if (!file || !uploadTarget) return
+    void uploadBanner(uploadTarget, file)
+  }
+
+  const confirmRemoveBanner = async () => {
+    if (!bannerRemoveTarget || removingBanner) return
+    setRemovingBanner(true)
+    try {
+      await apiJson(`/api/admin/categories/${bannerRemoveTarget.id}/banner`, 'DELETE')
+      toast.success(`Banner removed from “${bannerRemoveTarget.name}”.`)
+      setBannerRemoveTarget(null)
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not remove the banner.')
+    } finally {
+      setRemovingBanner(false)
+    }
+  }
 
   const openCreate = () => {
     setEditing(null)
@@ -318,6 +581,153 @@ export default function AdminCategories() {
         </Button>
       </div>
 
+      {/* Explore grid layout (SPEC-3) */}
+      <div className="rounded-2xl border bg-card p-4 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <LayoutGrid className="h-4 w-4 text-primary" aria-hidden="true" />
+          <h3 className="text-sm font-semibold">Explore layout</h3>
+          <p className="text-xs text-muted-foreground">
+            Controls the category card grid on the Explore page.
+          </p>
+        </div>
+        {layoutFailed ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">Couldn&apos;t load the explore layout.</p>
+            <Button variant="outline" size="sm" onClick={() => loadLayout()}>
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-44 space-y-1.5">
+              <Label htmlFor="layout-per-row">Categories per row</Label>
+              <Input
+                id="layout-per-row"
+                type="number"
+                min={1}
+                max={6}
+                value={perRowInput}
+                onChange={(e) => setPerRowInput(e.target.value)}
+                disabled={layoutLoading}
+                dir="ltr"
+              />
+            </div>
+            <div className="w-44 space-y-1.5">
+              <Label htmlFor="layout-threshold">Show before More</Label>
+              <Input
+                id="layout-threshold"
+                type="number"
+                min={3}
+                max={24}
+                value={thresholdInput}
+                onChange={(e) => setThresholdInput(e.target.value)}
+                disabled={layoutLoading}
+                dir="ltr"
+              />
+            </div>
+            <Button
+              onClick={saveLayout}
+              disabled={layoutSaving || layoutLoading}
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+            >
+              {layoutSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {layoutSaving ? 'Saving…' : 'Save layout'}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Explore section order — which section appears first on the Explore page */}
+      <div className="rounded-2xl border bg-card p-4 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <ListOrdered className="h-4 w-4 text-primary" aria-hidden="true" />
+          <h3 className="text-sm font-semibold">Explore section order</h3>
+          <p className="text-xs text-muted-foreground">
+            Choose the order in which sections appear on the Explore page.
+          </p>
+        </div>
+        {layoutFailed ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">Couldn&apos;t load the section order.</p>
+            <Button variant="outline" size="sm" onClick={() => loadLayout()}>
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
+            <ul
+              className="w-full max-w-sm divide-y overflow-hidden rounded-xl border bg-background/40"
+              aria-label="Explore section order"
+            >
+              {sectionOrder.map((id, i) => {
+                const meta = EXPLORE_SECTION_META.find((s) => s.id === id)
+                if (!meta) return null
+                const Icon = meta.icon
+                return (
+                  <li key={id} className="flex items-center gap-3 px-3 py-2.5">
+                    <GripVertical
+                      className="h-4 w-4 shrink-0 text-muted-foreground/50"
+                      aria-hidden="true"
+                    />
+                    <span className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
+                      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <span className="truncate">{meta.label}</span>
+                    </span>
+                    <span
+                      className="shrink-0 text-xs tabular-nums text-muted-foreground"
+                      aria-hidden="true"
+                    >
+                      {i + 1}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        aria-label={`Move ${meta.label} up`}
+                        disabled={i === 0 || orderSaving || layoutLoading}
+                        onClick={() => moveSection(i, -1)}
+                      >
+                        <ChevronUp className="h-4 w-4" aria-hidden="true" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        aria-label={`Move ${meta.label} down`}
+                        disabled={i === sectionOrder.length - 1 || orderSaving || layoutLoading}
+                        onClick={() => moveSection(i, 1)}
+                      >
+                        <ChevronDown className="h-4 w-4" aria-hidden="true" />
+                      </Button>
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+            <div className="flex flex-col items-start gap-1.5">
+              <Button
+                onClick={saveSectionOrder}
+                disabled={orderSaving || layoutLoading || !orderDirty}
+                className="bg-emerald-600 text-white hover:bg-emerald-700"
+              >
+                {orderSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {orderSaving ? 'Saving…' : 'Save order'}
+              </Button>
+              <p className="text-xs text-muted-foreground" aria-live="polite">
+                {orderDirty && !orderSaving
+                  ? 'Unsaved changes — Save order to apply.'
+                  : 'The public Explore page follows this order.'}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
       {loading ? (
         <div className="space-y-3" aria-busy="true" aria-label="Loading categories">
           {[0, 1, 2, 3].map((i) => (
@@ -368,6 +778,7 @@ export default function AdminCategories() {
                 <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
                   <th scope="col" className="px-4 py-3 font-medium">Category</th>
                   <th scope="col" className="px-4 py-3 font-medium">Description</th>
+                  <th scope="col" className="px-4 py-3 font-medium">Banner</th>
                   <th scope="col" className="px-4 py-3 font-medium">Posts</th>
                   <th scope="col" className="px-4 py-3 font-medium">Active</th>
                   <th scope="col" className="px-4 py-3 font-medium">Order</th>
@@ -395,6 +806,40 @@ export default function AdminCategories() {
                       <p className="line-clamp-2 text-muted-foreground" dir="auto">
                         {cat.description || <span className="italic opacity-70">No description</span>}
                       </p>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <BannerPreview category={cat} className="h-11 w-20 shrink-0" />
+                        <div className="flex flex-col gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2.5"
+                            onClick={() => pickBanner(cat)}
+                            disabled={uploadingId === cat.id}
+                            aria-label={`Upload or replace banner for ${cat.name}`}
+                          >
+                            {uploadingId === cat.id ? (
+                              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <ImagePlus className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            {cat.banner_url ? 'Replace' : 'Upload'}
+                          </Button>
+                          {cat.banner_url && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                              onClick={() => setBannerRemoveTarget(cat)}
+                              aria-label={`Remove banner from ${cat.name}`}
+                            >
+                              <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                              Remove
+                            </Button>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <Badge variant="secondary" className="tabular-nums">{cat.postsCount ?? 0}</Badge>
@@ -473,6 +918,35 @@ export default function AdminCategories() {
                     {cat.description && (
                       <p className="mt-1 line-clamp-2 text-sm text-muted-foreground" dir="auto">{cat.description}</p>
                     )}
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <BannerPreview category={cat} className="h-12 w-20 shrink-0" />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => pickBanner(cat)}
+                        disabled={uploadingId === cat.id}
+                        aria-label={`Upload or replace banner for ${cat.name}`}
+                      >
+                        {uploadingId === cat.id ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <ImagePlus className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        {cat.banner_url ? 'Replace' : 'Upload'}
+                      </Button>
+                      {cat.banner_url && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setBannerRemoveTarget(cat)}
+                          aria-label={`Remove banner from ${cat.name}`}
+                        >
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                          Remove
+                        </Button>
+                      )}
+                    </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <div className="flex items-center gap-2">
                         <Switch
@@ -659,8 +1133,22 @@ export default function AdminCategories() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete “{deleteTarget?.name}”?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently removes the category. Categories that are used by posts cannot be
-              deleted — deactivate them instead.
+              {(deleteTarget?.postsCount ?? 0) > 0 ? (
+                <>
+                  This category has <strong>{deleteTarget?.postsCount} post{(deleteTarget?.postsCount ?? 0) === 1 ? '' : 's'}</strong>.
+                  Deleting it permanently removes those posts together with their likes, views,
+                  comments, saves, and media. This cannot be undone.
+                  <span className="mt-2 block text-muted-foreground">
+                    Prefer hiding it? Cancel and deactivate the category instead — posts stay
+                    intact.
+                  </span>
+                </>
+              ) : (
+                <>
+                  This permanently removes the category. It has no posts, so nothing else is
+                  affected. This cannot be undone.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -674,6 +1162,46 @@ export default function AdminCategories() {
             >
               {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {deleting ? 'Deleting…' : 'Delete category'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Hidden file picker driving banner uploads (one input, per-row target). */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={BANNER_ACCEPT}
+        className="hidden"
+        onChange={onBannerFile}
+        aria-hidden="true"
+        tabIndex={-1}
+      />
+
+      {/* Banner removal confirmation */}
+      <AlertDialog
+        open={!!bannerRemoveTarget}
+        onOpenChange={(open) => !open && !removingBanner && setBannerRemoveTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove “{bannerRemoveTarget?.name}” banner?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The banner image is deleted and the category card falls back to its color tile on
+              Explore.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removingBanner}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault()
+                confirmRemoveBanner()
+              }}
+            >
+              {removingBanner ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {removingBanner ? 'Removing…' : 'Remove banner'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -2,7 +2,8 @@ import { NextRequest } from 'next/server'
 import { supabase, nowIso } from '@/lib/supabase'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { requireAdmin } from '@/lib/auth'
-import { auditLog } from '@/lib/realtime'
+import { auditLog, emitRealtime } from '@/lib/realtime'
+import { hardDeletePosts, type CascadeSummary } from '@/lib/post-cascade'
 import type { CategoryDTO } from '@/lib/types'
 
 type CategoryRow = {
@@ -55,7 +56,7 @@ async function fetchCategory(id: string): Promise<CategoryRow | null> {
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { id } = await ctx.params
     const prev = await fetchCategory(id)
@@ -140,30 +141,52 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       .select('id', { count: 'exact', head: true })
       .eq('category_id', id)
     if (cntErr) throw new Error(cntErr.message)
+
+    // Live refresh for every open Explore/feed/admin-categories client.
+    await emitRealtime({ event: 'categories:changed', room: 'all', payload: { id } })
     return ok({ category: categoryOut(next, count ?? 0) })
   })
 }
 
 /**
- * Safe-delete: a category still referenced by posts is never removed
- * (posts would lose their grouping) — the admin is told to deactivate instead.
+ * PRODUCTION-SAFE CASCADE DELETE.
+ *
+ * Deleting a category hard-deletes every post in it (and each post's full
+ * dependency tree: likes, views, bookmarks, comments + comment-likes +
+ * mentions, CTA clicks, attachments + storage objects, notifications) via
+ * the shared src/lib/post-cascade.ts helper — the exact same cleanup the
+ * single-post permanent delete uses. Conversations keep their history
+ * (post_id set null). The category row is removed last.
+ *
+ * The route is idempotent-safe: unknown ids 404; every step stops on error so
+ * the audit trail never claims more than what actually happened.
  */
 export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { id } = await ctx.params
     const row = await fetchCategory(id)
     if (!row) return errors.notFound('Category')
 
-    const { count, error: cntErr } = await supabase
+    // Posts that still live in this category — they and their dependency
+    // trees go away with the category (nothing is left orphaned or
+    // uncategorized).
+    const { data: postRows, error: postErr } = await supabase
       .from('mux_posts')
-      .select('id', { count: 'exact', head: true })
+      .select('id')
       .eq('category_id', id)
-    if (cntErr) throw new Error(cntErr.message)
-    if ((count ?? 0) > 0) {
-      return fail(`Category is used by ${count} posts — deactivate it instead.`)
+    if (postErr) throw new Error(postErr.message)
+    const postIds = ((postRows ?? []) as { id: string }[]).map((r) => r.id)
+
+    let summary: CascadeSummary = {
+      posts: 0, likes: 0, views: 0, bookmarks: 0, comments: 0, commentLikes: 0,
+      mentions: 0, ctaClicks: 0, attachments: 0, notifications: 0,
+      storageRemoved: 0, storageFailed: 0,
+    }
+    if (postIds.length > 0) {
+      summary = await hardDeletePosts(postIds)
     }
 
     const { error } = await supabase.from('mux_categories').delete().eq('id', id)
@@ -171,11 +194,34 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
 
     await auditLog({
       actorId: admin.id,
-      action: 'category.deleted',
+      action: 'category-cascade-deleted',
       targetType: 'category',
       targetId: id,
-      metadata: { prev: snapshot(row) },
+      metadata: {
+        prev: snapshot(row),
+        deleted: {
+          posts: summary.posts,
+          likes: summary.likes,
+          views: summary.views,
+          bookmarks: summary.bookmarks,
+          comments: summary.comments,
+          commentLikes: summary.commentLikes,
+          mentions: summary.mentions,
+          ctaClicks: summary.ctaClicks,
+          attachments: summary.attachments,
+          notifications: summary.notifications,
+        },
+        storageRemoved: summary.storageRemoved,
+        storageFailed: summary.storageFailed,
+      },
     })
-    return ok({ success: true })
+
+    await emitRealtime({
+      event: 'feed:posts-bulk-deleted',
+      room: 'all',
+      payload: { postIds, categoryId: id },
+    })
+    await emitRealtime({ event: 'categories:changed', room: 'all', payload: { id } })
+    return ok({ success: true, postsDeleted: summary.posts })
   })
 }

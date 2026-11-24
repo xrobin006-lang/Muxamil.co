@@ -1,12 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   CalendarDays,
   Check,
   ChevronRight,
   Loader2,
+  MessageCircle,
   RefreshCw,
   ShieldCheck,
   UserCheck,
@@ -24,23 +25,23 @@ import type { CommunityDTO } from '@/lib/types'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
 import { EmptyState } from '../components/empty-state'
+import { ProfileBanner } from '../components/profile-banner'
 
 /** GET /api/users/[id] → the follow fields live INSIDE `user` (live-verified):
- *  followersCount, followingCount, isFollowing are siblings of isVerified.
- *  followersDisplayCount = real + admin override (equals real when unset,
- *  never negative) — older cached shapes may lack it, hence optional. */
+ *  followersCount, followingCount, isFollowing are siblings of isVerified. */
 type PublicUserDTO = {
   id: string
   fullName: string
   username: string
   avatarUrl: string | null
-  bannerUrl?: string | null
+  bannerUrl: string | null
+  /** Banner focal point — responsive cover positioning. */
+  bannerFit?: { x: number; y: number; scale: number } | null
   bio: string
   role: 'admin' | 'user'
   isVerified: boolean
   createdAt: string
   followersCount?: number
-  followersDisplayCount?: number
   followingCount?: number
   isFollowing?: boolean
 }
@@ -85,18 +86,25 @@ export default function UserProfileView({ userId }: { userId: string }) {
   const [notFound, setNotFound] = useState(false)
   const [failed, setFailed] = useState(false)
   const [followPending, setFollowPending] = useState(false)
+  const [dmPending, setDmPending] = useState(false)
 
   /** Live presence for the viewed profile (admins: "an admin is online"). */
   const isOnline = data ? (data.user.role === 'admin' ? adminOnline : onlineIds.has(data.user.id)) : false
 
+  /** Guards load() against out-of-order responses when userId changes in
+   *  quick succession (same pattern as feed-view's loadSeqRef). */
+  const loadSeqRef = useRef(0)
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current
     setLoading(true)
     setNotFound(false)
     setFailed(false)
     try {
       const res = await apiGet<UserProfileResponse>(`/api/users/${encodeURIComponent(userId)}`)
+      if (seq !== loadSeqRef.current) return
       setData(res)
     } catch (err) {
+      if (seq !== loadSeqRef.current) return
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true)
       } else {
@@ -104,7 +112,7 @@ export default function UserProfileView({ userId }: { userId: string }) {
         toast.error(err instanceof Error ? err.message : 'Could not load this profile.')
       }
     } finally {
-      setLoading(false)
+      if (seq === loadSeqRef.current) setLoading(false)
     }
   }, [userId])
 
@@ -112,27 +120,21 @@ export default function UserProfileView({ userId }: { userId: string }) {
     load()
   }, [load])
 
-  /** Toggle follow — optimistic, reverts on failure. Gate 403 → friendly toast.
-   *  The displayed count keeps the same admin adjustment across the flip:
-   *  displayed = real + (displayedBefore − realBefore). */
+  /** Toggle follow — optimistic, reverts on failure. Gate 403 → friendly toast. */
   const toggleFollow = async () => {
     if (!data || followPending) return
     const prev = {
       followersCount: data.user.followersCount ?? 0,
-      followersDisplayCount: data.user.followersDisplayCount ?? data.user.followersCount ?? 0,
       isFollowing: data.user.isFollowing ?? false,
     }
     const nextFollowing = !prev.isFollowing
-    const delta = nextFollowing ? 1 : -1
-    const adjustment = prev.followersDisplayCount - prev.followersCount
     setFollowPending(true)
     setData({
       ...data,
       user: {
         ...data.user,
         isFollowing: nextFollowing,
-        followersCount: Math.max(0, prev.followersCount + delta),
-        followersDisplayCount: Math.max(0, prev.followersCount + delta + adjustment),
+        followersCount: Math.max(0, prev.followersCount + (nextFollowing ? 1 : -1)),
       },
     })
     try {
@@ -141,33 +143,13 @@ export default function UserProfileView({ userId }: { userId: string }) {
         'POST',
       )
       setData((d) =>
-        d
-          ? {
-              ...d,
-              user: {
-                ...d.user,
-                isFollowing: res.following,
-                followersCount: res.followersCount,
-                followersDisplayCount: Math.max(0, res.followersCount + adjustment),
-              },
-            }
-          : d,
+        d ? { ...d, user: { ...d.user, isFollowing: res.following, followersCount: res.followersCount } } : d,
       )
       toast.success(res.following ? `Following ${data.user.fullName}.` : `Unfollowed ${data.user.fullName}.`)
     } catch (err) {
       // Revert the optimistic flip before surfacing the error.
       setData((d) =>
-        d
-          ? {
-              ...d,
-              user: {
-                ...d.user,
-                isFollowing: prev.isFollowing,
-                followersCount: prev.followersCount,
-                followersDisplayCount: prev.followersDisplayCount,
-              },
-            }
-          : d,
+        d ? { ...d, user: { ...d.user, isFollowing: prev.isFollowing, followersCount: prev.followersCount } } : d,
       )
       if (err instanceof ApiError && err.status === 403) {
         toast.error('Follows are disabled')
@@ -176,6 +158,24 @@ export default function UserProfileView({ userId }: { userId: string }) {
       }
     } finally {
       setFollowPending(false)
+    }
+  }
+
+  /** Start (or reopen) a DM with this verified member, then jump straight
+   *  into the thread. Eligibility is enforced server-side; the button only
+   *  reflects the rule (verified members, not admins, not yourself). */
+  const startDm = async () => {
+    if (!data || dmPending) return
+    setDmPending(true)
+    try {
+      const res = await apiJson<{ conversation: { id: string } }>('/api/dm/conversations', 'POST', {
+        targetId: data.user.id,
+      })
+      navigate({ name: 'dm', conversationId: res.conversation.id })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not start the conversation.')
+    } finally {
+      setDmPending(false)
     }
   }
 
@@ -243,28 +243,25 @@ export default function UserProfileView({ userId }: { userId: string }) {
 
   const { user, community } = data
   const isOwnProfile = user.id === currentUser.id
+  const isAdminProfile = user.role === 'admin'
   const isFollowing = user.isFollowing ?? false
-  // Displayed count = real + admin override (falls back to the real count for
-  // older cached responses that lack the new field).
-  const followersCount = user.followersDisplayCount ?? user.followersCount ?? 0
+  const followersCount = user.followersCount ?? 0
   const followingCount = user.followingCount ?? 0
+  // DM entry point: any active member (Master Chat task — member-to-member
+  // messaging is the core feature; eligibility is enforced server-side).
+  // Admins stay reachable through Admin Chat, never on your own profile,
+  // and only for regular member viewers.
+  const canMessage =
+    !isOwnProfile &&
+    !isAdminProfile &&
+    currentUser.role === 'user' &&
+    !currentUser.isBlocked
 
   return (
     <div className="space-y-4">
       {/* Profile header */}
       <section className="overflow-hidden rounded-2xl border bg-card shadow-sm">
-        {user.bannerUrl ? (
-          <img
-            src={user.bannerUrl}
-            alt={`${user.fullName}'s profile banner`}
-            className="h-28 w-full object-cover sm:h-36"
-          />
-        ) : (
-          <div
-            className="h-28 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-36"
-            aria-hidden="true"
-          />
-        )}
+        <ProfileBanner url={user.bannerUrl} name={user.fullName} fit={user.bannerFit ?? null} />
         <div className="px-4 pb-5 sm:px-6">
           <div className="-mt-12 flex flex-wrap items-end justify-between gap-3 sm:-mt-14">
             <div className="relative">
@@ -278,27 +275,44 @@ export default function UserProfileView({ userId }: { userId: string }) {
               )}
             </div>
             {/* Own profile is edited from the private profile view; other
-                profiles offer a follow toggle (hidden for yourself). */}
+                profiles offer a follow toggle (hidden for yourself and for
+                admin accounts — they cannot be followed). */}
             {isOwnProfile ? (
               <Button variant="outline" onClick={() => navigate({ name: 'profile' })}>
                 Edit profile
               </Button>
-            ) : (
-              <Button
-                variant={isFollowing ? 'outline' : 'default'}
-                onClick={toggleFollow}
-                disabled={followPending}
-                aria-pressed={isFollowing}
-              >
-                {followPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : isFollowing ? (
-                  <UserCheck className="mr-2 h-4 w-4" aria-hidden="true" />
-                ) : (
-                  <UserPlus className="mr-2 h-4 w-4" aria-hidden="true" />
+            ) : isAdminProfile ? null : (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant={isFollowing ? 'outline' : 'default'}
+                  onClick={toggleFollow}
+                  disabled={followPending}
+                  aria-pressed={isFollowing}
+                >
+                  {followPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : isFollowing ? (
+                    <UserCheck className="mr-2 h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <UserPlus className="mr-2 h-4 w-4" aria-hidden="true" />
+                  )}
+                  {isFollowing ? 'Following' : 'Follow'}
+                </Button>
+                {canMessage && (
+                  <Button
+                    variant={isFollowing ? 'default' : 'outline'}
+                    onClick={() => void startDm()}
+                    disabled={dmPending}
+                  >
+                    {dmPending ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <MessageCircle className="mr-2 h-4 w-4" aria-hidden="true" />
+                    )}
+                    Message
+                  </Button>
                 )}
-                {isFollowing ? 'Following' : 'Follow'}
-              </Button>
+              </div>
             )}
           </div>
 
@@ -324,24 +338,48 @@ export default function UserProfileView({ userId }: { userId: string }) {
               </p>
             )}
 
-            {/* Follow stats — real counts from the profile endpoint. */}
+            {/* Follow stats — compact K/M/B formatting. Normal members show
+                REAL counts; the admin profile shows the admin-controlled
+                display count (public number only — no follower list is ever
+                exposed). The admin's Following stat opens the public list of
+                real relationships; member stats stay display-only. */}
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm" aria-label="Follow statistics">
               <span className="inline-flex items-center gap-1.5">
                 <UsersRound className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                <span className="font-semibold tabular-nums" title={`${followersCount.toLocaleString()} followers`}>{formatCount(followersCount)}</span>
+                <span className="font-semibold tabular-nums">{formatCount(followersCount)}</span>
                 <span className="text-muted-foreground">
                   Follower{followersCount === 1 ? '' : 's'}
                 </span>
               </span>
-              <span className="inline-flex items-center gap-1.5">
-                {isFollowing ? (
-                  <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                ) : (
-                  <UserCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                )}
-                <span className="font-semibold tabular-nums" title={`${followingCount.toLocaleString()} following`}>{formatCount(followingCount)}</span>
-                <span className="text-muted-foreground">Following</span>
-              </span>
+              {isAdminProfile ? (
+                <button
+                  type="button"
+                  onClick={() => navigate({ name: 'following', userId: user.id })}
+                  className="group -mx-1.5 inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`View following list (${formatCount(followingCount)} following)`}
+                >
+                  {isFollowing ? (
+                    <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                  ) : (
+                    <UserCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  )}
+                  <span className="font-semibold tabular-nums underline-offset-4 group-hover:underline">
+                    {formatCount(followingCount)}
+                  </span>
+                  <span className="text-muted-foreground underline-offset-4">Following</span>
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                </button>
+              ) : (
+                <span className="inline-flex items-center gap-1.5">
+                  {isFollowing ? (
+                    <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                  ) : (
+                    <UserCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  )}
+                  <span className="font-semibold tabular-nums">{formatCount(followingCount)}</span>
+                  <span className="text-muted-foreground">Following</span>
+                </span>
+              )}
             </div>
 
             <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
