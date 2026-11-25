@@ -10,8 +10,12 @@ import ChatWindow from '../components/chat-window'
  * The signed-in user's private conversation with the admin team.
  * The conversation is lazy-created server-side on the first message, so the
  * window starts without an id and shows a friendly hello state until then.
+ *
+ * `orderContext` (from the Store's Order Now action) pre-arms the window with
+ * a product/order card + a pre-filled editable message — nothing is sent until
+ * the user intentionally presses Send.
  */
-export default function ChatView() {
+export default function ChatView({ orderContext }: { orderContext?: string }) {
   const setUnreadMessages = useAppStore((s) => s.setUnreadMessages)
 
   // Entering the chat clears the unread badge — everything rendered is read.
@@ -42,8 +46,9 @@ export default function ChatView() {
         online: true,
       }}
       emptyTitle="Say hello to the admin team 👋"
-      emptyDescription="This is your private conversation with the Muxamil.co admin team — ask questions, report issues or share feedback. You can also send photos, documents and voice messages with the mic button."
+      emptyDescription="This is your private conversation with the admin team — ask questions, report issues or share feedback. You can also send photos, documents and voice messages with the mic button."
       className="h-[calc(100dvh-190px)] lg:h-[calc(100dvh-165px)]"
+      orderContext={orderContext}
     />
   )
 }

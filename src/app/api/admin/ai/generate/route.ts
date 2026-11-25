@@ -4,6 +4,7 @@ import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { requireAdmin } from '@/lib/auth'
 import { auditLog } from '@/lib/realtime'
 import { aiGenerate } from '@/lib/ai'
+import { rateLimit, clientKeyFrom } from '@/lib/rate-limit'
 
 /** AI replies are offered only for freshly published posts (7-day window). */
 const AI_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -37,7 +38,12 @@ type PostCtxRow = {
 export async function POST(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
+
+    // Cost guard: AI generation spends provider credits — cap per admin.
+    if (!rateLimit('admin-ai', clientKeyFrom(req, admin.id), 10, 60_000)) {
+      return fail('AI generation is being used too quickly. Please wait a moment.', 429)
+    }
 
     const body = await req.json().catch(() => null)
     const postId = typeof body?.postId === 'string' ? body.postId : ''

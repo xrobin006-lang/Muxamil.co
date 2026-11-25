@@ -2,10 +2,24 @@ import { NextRequest } from 'next/server'
 import { ok, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
 import { supabase, type MuxProfileRow } from '@/lib/supabase'
-import { getFollowerAdjustment } from '@/lib/compat-store'
-import { AI_ACCOUNT_USERNAME } from '@/lib/types'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Upper bound for the admin follower display override (≈9.99B — the compact
+ *  formatter tops out at B, and the value stays well inside JS safe integers). */
+const MAX_DISPLAY_FOLLOWERS = 9_999_999_999
+
+/** Admin-only display override for the follower count, stored in the legacy
+ *  `appearance` jsonb column under `displayed_followers` (the pre-existing
+ *  production convention). Normal members NEVER get an override — their
+ *  counts are always the real `mux_follows` totals. */
+function adminDisplayFollowers(profile: MuxProfileRow): number | null {
+  if (profile.role !== 'admin') return null
+  const raw = profile.appearance?.displayed_followers
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw)) return null
+  if (raw < 0 || raw > MAX_DISPLAY_FOLLOWERS) return null
+  return raw
+}
 
 type CommunityCard = {
   id: string
@@ -44,13 +58,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     const profile = (profileData as MuxProfileRow | null) ?? null
     if (!profile || profile.status === 'blocked') return errors.notFound('User')
 
-    // The muxamil.ai system account is an INTERNAL identity (spec §11): it
-    // never surfaces to normal members — no public AI labels, and it is never
-    // presented as a real human profile. Admins keep visibility for audit.
-    if (profile.username === AI_ACCOUNT_USERNAME && viewer.role !== 'admin') {
-      return errors.notFound('User')
-    }
-
     // Community is only surfaced when the owner is verified and it is active.
     let communityCard: CommunityCard | null = null
     if (profile.is_verified) {
@@ -80,9 +87,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       }
     }
 
-    // Follow stats, the viewer's own relationship, and the admin display
-    // adjustment (compat store; 0 when no override exists).
-    const [followersRes, followingRes, isFollowingRes, adjustment] = await Promise.all([
+    // Follow stats + the viewer's own relationship to this profile.
+    const [followersRes, followingRes, isFollowingRes] = await Promise.all([
       supabase
         .from('mux_follows')
         .select('id', { count: 'exact', head: true })
@@ -97,11 +103,25 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
         .eq('follower_id', viewer.id)
         .eq('following_id', profile.id)
         .limit(1),
-      getFollowerAdjustment(profile.id),
     ])
     if (followersRes.error) throw new Error(followersRes.error.message)
     if (followingRes.error) throw new Error(followingRes.error.message)
     if (isFollowingRes.error) throw new Error(isFollowingRes.error.message)
+
+    // Admin profiles show the admin-controlled display count (a public number
+    // only — the individual follower list is never exposed by any route).
+    // Everyone else always sees the real mux_follows total.
+    const displayOverride = adminDisplayFollowers(profile)
+
+    // Banner focal point (appearance.banner_fit) for the responsive cover.
+    const bannerFitRaw = (profile.appearance ?? {}).banner_fit
+    const bannerFit =
+      bannerFitRaw && typeof bannerFitRaw === 'object' &&
+      typeof (bannerFitRaw as { x?: unknown }).x === 'number' &&
+      typeof (bannerFitRaw as { y?: unknown }).y === 'number' &&
+      typeof (bannerFitRaw as { scale?: unknown }).scale === 'number'
+        ? (bannerFitRaw as { x: number; y: number; scale: number })
+        : null
 
     return ok({
       user: {
@@ -110,17 +130,14 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
         username: profile.username || '',
         avatarUrl: profile.avatar_url,
         bannerUrl: profile.banner_url ?? null,
+        bannerFit,
         bio: profile.bio || '',
         role: profile.role === 'admin' ? 'admin' : 'user',
         isVerified: !!profile.is_verified,
         isBlocked: profile.status === 'blocked',
         createdAt: profile.created_at,
-        followersCount: followersRes.count ?? 0,
+        followersCount: displayOverride !== null ? displayOverride : (followersRes.count ?? 0),
         followingCount: followingRes.count ?? 0,
-        // Centralized displayed-follower rule (spec §31): displayed = real +
-        // admin adjustment; with no override the shown value is exactly the
-        // real count. Never below zero.
-        followersDisplayCount: Math.max(0, (followersRes.count ?? 0) + adjustment),
         isFollowing: (isFollowingRes.data?.length ?? 0) > 0,
       },
       community: communityCard,

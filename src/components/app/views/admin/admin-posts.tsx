@@ -28,6 +28,7 @@ import {
   ArrowUp,
   ArrowDown,
   MousePointerClick,
+  Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -71,7 +72,7 @@ import { apiGet, apiJson, apiUpload } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
 import type { CategoryDTO, PostDTO } from '@/lib/types'
-import { formatBytes, formatCount, formatFullDate } from '@/lib/format'
+import { formatBytes, formatFullDate } from '@/lib/format'
 import { PostCard } from '../../components/post-card'
 import { EmptyState } from '../../components/empty-state'
 import { cn } from '@/lib/utils'
@@ -118,9 +119,6 @@ function untilLabel(iso: string): string {
 /** Editable CTA row (max 4 — mirrored from the backend validator). */
 type CtaDraft = { key: string; label: string; url: string }
 
-/** Polls are NOT a feature of Muxamil.co — the poll composer, poll voting
- *  UI, poll management controls and poll APIs were all removed. */
-
 const MAX_ATTACHMENTS = 12
 const MAX_CONTENT = 8000
 const MAX_TITLE = 120
@@ -147,6 +145,13 @@ const STATUS_TABS: { key: StatusTab; label: string }[] = [
   { key: 'draft', label: 'Drafts' },
   { key: 'scheduled', label: 'Scheduled' },
 ]
+
+/** Which status tab a post counts under (legacy NULL status → draft). */
+function statusBucket(post: { status: string; isPublished: boolean }): Exclude<StatusTab, 'all'> {
+  if (post.status === 'scheduled') return 'scheduled'
+  if (post.status === 'published' || post.isPublished) return 'published'
+  return 'draft'
+}
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -348,6 +353,10 @@ export default function AdminPosts() {
   const [republishingId, setRepublishingId] = useState<string | null>(null)
   const [pinningId, setPinningId] = useState<string | null>(null)
 
+  // Permanent delete state (cascade route /api/admin/posts/[id])
+  const [permTarget, setPermTarget] = useState<AdminPost | null>(null)
+  const [permaDeleting, setPermaDeleting] = useState(false)
+
   // Edit dialog state (full composer prefill)
   const [editTarget, setEditTarget] = useState<AdminPost | null>(null)
   const [editTitle, setEditTitle] = useState('')
@@ -443,6 +452,42 @@ export default function AdminPosts() {
 
   useSocketEvent('feed:post-updated', () => {
     loadPosts(true)
+  })
+
+  // Permanent delete from another admin (cascade route) — the row is GONE,
+  // so it leaves the list entirely (unlike the soft-unpublish flip above).
+  useSocketEvent('feed:post-hard-deleted', (payload) => {
+    const { id } = payload as unknown as { id: string }
+    if (!id) return
+    const gone = posts.find((p) => p.id === id)
+    setPosts((prev) => prev.filter((p) => p.id !== id))
+    setTotal((t) => Math.max(0, t - 1))
+    setCounts((c) => {
+      if (!c) return c
+      const next = { ...c, all: Math.max(0, c.all - 1) }
+      if (gone) next[statusBucket(gone)] = Math.max(0, next[statusBucket(gone)] - 1)
+      return next
+    })
+  })
+
+  // A whole category was cascade-deleted — every post of the batch leaves
+  // the admin list at once (counts adjust per removed row).
+  useSocketEvent('feed:posts-bulk-deleted', (payload) => {
+    const { postIds } = payload as unknown as { postIds?: string[] }
+    if (!postIds || postIds.length === 0) {
+      loadPosts(true)
+      return
+    }
+    const gone = new Set(postIds)
+    const removed = posts.filter((p) => gone.has(p.id))
+    setPosts((prev) => prev.filter((p) => !gone.has(p.id)))
+    setTotal((t) => Math.max(0, t - removed.length))
+    setCounts((c) => {
+      if (!c) return c
+      const next = { ...c, all: Math.max(0, c.all - removed.length) }
+      for (const p of removed) next[statusBucket(p)] = Math.max(0, next[statusBucket(p)] - 1)
+      return next
+    })
   })
 
   const updateDraft = (localId: string, patch: Partial<DraftAttachment>) => {
@@ -622,6 +667,29 @@ export default function AdminPosts() {
     }
   }
 
+  const confirmPermanentDelete = async () => {
+    if (!permTarget || permaDeleting) return
+    setPermaDeleting(true)
+    try {
+      await apiJson(`/api/admin/posts/${permTarget.id}`, 'DELETE')
+      const bucket = statusBucket(permTarget)
+      setPosts((prev) => prev.filter((p) => p.id !== permTarget.id))
+      setTotal((t) => Math.max(0, t - 1))
+      setCounts((c) => {
+        if (!c) return c
+        const next = { ...c, all: Math.max(0, c.all - 1) }
+        next[bucket] = Math.max(0, next[bucket] - 1)
+        return next
+      })
+      toast.success('Post permanently deleted.')
+      setPermTarget(null)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not permanently delete the post.')
+    } finally {
+      setPermaDeleting(false)
+    }
+  }
+
   const republish = async (post: AdminPost) => {
     if (republishingId) return
     setRepublishingId(post.id)
@@ -764,7 +832,7 @@ export default function AdminPosts() {
                 statusTab === tab.key ? 'bg-primary-foreground/20' : 'bg-muted text-muted-foreground',
               )}
             >
-              {counts ? formatCount(counts[tab.key]) : '…'}
+              {counts ? counts[tab.key].toLocaleString() : '…'}
             </span>
           </Button>
         ))}
@@ -1261,6 +1329,15 @@ export default function AdminPosts() {
                     <Sparkles className="h-3.5 w-3.5" aria-hidden="true" /> AI reply
                   </Button>
                 )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  onClick={() => setPermTarget(post)}
+                  aria-label={`Permanently delete post “${post.title}”`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" /> Delete forever
+                </Button>
               </div>
 
               <PostCard
@@ -1275,7 +1352,7 @@ export default function AdminPosts() {
           {/* Pagination */}
           <div className="flex items-center justify-between gap-3 pt-1">
             <p className="text-xs text-muted-foreground">
-              {formatCount(total)} {total === 1 ? 'post' : 'posts'}
+              {total.toLocaleString()} {total === 1 ? 'post' : 'posts'}
             </p>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
@@ -1311,6 +1388,33 @@ export default function AdminPosts() {
             >
               {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {deleting ? 'Unpublishing…' : 'Unpublish post'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Permanent delete confirmation — cascade-removes every dependent row */}
+      <AlertDialog open={!!permTarget} onOpenChange={(open) => !open && !permaDeleting && setPermTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Permanently delete “{permTarget?.title || 'Untitled'}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes the post together with its likes, views, bookmarks,
+              comments and attachments — it cannot be undone. To hide the post and keep its
+              data, unpublish it instead.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={permaDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault()
+                confirmPermanentDelete()
+              }}
+            >
+              {permaDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {permaDeleting ? 'Deleting…' : 'Permanently delete'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1490,175 +1594,117 @@ export default function AdminPosts() {
   )
 }
 
-/**
- * Admin counter controls — real vs displayed management for ONE counter
- * (likes or views). Displayed = real + adjustment; the displayed value is
- * what members see (formatted K/M/B). Real member activity is NEVER
- * modified and overrides never create/delete real rows.
- *
- * Controls: +1 · +10 · −1 · −10 (on the DISPLAYED value), Custom (set the
- * displayed value directly), Reset (displayed = real). Negative displayed
- * counts are impossible (client clamp + server Math.max(0, …)). Changes of
- * ≥ 1000 require confirmation so large edits are deliberate.
- */
-function CounterControls({
-  post,
-  kind,
-  onSaved,
-}: {
-  post: AdminPost
-  kind: 'likes' | 'views'
-  onSaved: (post: AdminPost) => void
-}) {
-  const real = kind === 'likes' ? post.likesReal : post.viewsReal
-  const adjustment = kind === 'likes' ? (post.likeAdjustment ?? 0) : (post.viewAdjustment ?? 0)
-  const displayed = Math.max(0, real + adjustment)
-  const [custom, setCustom] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const label = kind === 'likes' ? 'Likes' : 'Views'
-
-  const saveDisplayed = async (nextDisplayed: number) => {
-    if (busy) return
-    const target = Math.max(0, Math.round(nextDisplayed))
-    const delta = target - displayed
-    if (delta === 0) {
-      toast.info(`${label} are already at ${formatCount(displayed)}.`)
-      return
-    }
-    if (Math.abs(delta) >= 1000) {
-      const okToApply = window.confirm(
-        `Set displayed ${label.toLowerCase()} from ${displayed.toLocaleString()} to ${target.toLocaleString()}?\n\nReal ${label.toLowerCase()} stay at ${real.toLocaleString()} — this only changes the displayed number and is written to the audit log.`,
-      )
-      if (!okToApply) return
-    }
-    setBusy(true)
-    try {
-      const body =
-        kind === 'likes'
-          ? { likeAdjustment: target - real }
-          : { viewAdjustment: target - real }
-      const data = await apiJson<{ post: PostDTO }>(`/api/posts/${post.id}`, 'PATCH', body)
-      // The PATCH response omits the adjustment fields — merge them back.
-      const patch: Partial<AdminPost> = { ...data.post }
-      if (kind === 'likes') patch.likeAdjustment = target - real
-      else patch.viewAdjustment = target - real
-      onSaved({ ...post, ...patch })
-      toast.success(
-        `Displayed ${label.toLowerCase()} set to ${formatCount(target)} (real ${formatCount(real)} unchanged).`,
-      )
-      setCustom('')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : `Could not update displayed ${label.toLowerCase()}.`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const quick = (delta: number) => () => void saveDisplayed(displayed + delta)
-
-  const applyCustom = () => {
-    const parsed = Number.parseInt(custom, 10)
-    if (custom.trim() === '' || Number.isNaN(parsed) || parsed < 0) {
-      toast.error('Enter a whole number of 0 or more.')
-      return
-    }
-    void saveDisplayed(parsed)
-  }
-
-  return (
-    <div className="space-y-2.5">
-      <div className="flex items-baseline justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
-        <p className="text-[11px] text-muted-foreground tabular-nums" title={`${real.toLocaleString()} real`}>
-          Real <span className="font-medium text-foreground">{formatCount(real)}</span>
-          {' · '}
-          Shown <span className="font-semibold text-primary">{formatCount(displayed)}</span>
-        </p>
-      </div>
-
-      <div className="grid grid-cols-4 gap-1.5">
-        {([-10, -1, 1, 10] as const).map((delta) => (
-          <Button
-            key={delta}
-            variant="outline"
-            size="sm"
-            disabled={busy || (delta < 0 && displayed <= 0)}
-            onClick={quick(delta)}
-            className="h-8 px-0 text-xs font-semibold tabular-nums"
-            aria-label={`${delta > 0 ? 'Increase' : 'Decrease'} displayed ${label.toLowerCase()} by ${Math.abs(delta)}`}
-          >
-            {delta > 0 ? `+${delta}` : `−${Math.abs(delta)}`}
-          </Button>
-        ))}
-      </div>
-
-      <div className="flex items-center gap-1.5">
-        <Input
-          id={`counter-custom-${kind}-${post.id}`}
-          type="number"
-          min={0}
-          placeholder={`Custom (now ${displayed.toLocaleString()})`}
-          value={custom}
-          onChange={(e) => setCustom(e.target.value)}
-          disabled={busy}
-          dir="ltr"
-          className="h-8 flex-1 text-xs"
-          aria-label={`Set displayed ${label.toLowerCase()} to a custom number`}
-        />
-        <Button
-          size="sm"
-          disabled={busy || custom.trim() === ''}
-          onClick={applyCustom}
-          className="h-8 bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
-        >
-          Set
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={busy || adjustment === 0}
-          onClick={() => void saveDisplayed(real)}
-          className="h-8 px-2 text-xs"
-          aria-label={`Reset displayed ${label.toLowerCase()} to the real value (${formatCount(real)})`}
-        >
-          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-          Reset
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/** Admin popover combining the like + view counter controls. */
+/** Display-number overrides: displayed = real + adjustment. */
 function AdjustPopover({ post, onSaved }: { post: AdminPost; onSaved: (post: AdminPost) => void }) {
   const [open, setOpen] = useState(false)
+  const [viewAdj, setViewAdj] = useState(String(post.viewAdjustment ?? 0))
+  const [likeAdj, setLikeAdj] = useState(String(post.likeAdjustment ?? 0))
+  const [saving, setSaving] = useState(false)
+
+  const save = async () => {
+    if (saving) return
+    const v = Number.parseInt(viewAdj, 10)
+    const l = Number.parseInt(likeAdj, 10)
+    if (Number.isNaN(v) || Number.isNaN(l)) {
+      toast.error('Adjustments must be whole numbers.')
+      return
+    }
+    setSaving(true)
+    try {
+      const data = await apiJson<{ post: PostDTO }>(`/api/posts/${post.id}`, 'PATCH', {
+        viewAdjustment: v,
+        likeAdjustment: l,
+      })
+      // The PATCH response omits the adjustment fields — merge them back so the
+      // popover shows the fresh values the next time it opens.
+      onSaved({ ...data.post, viewAdjustment: v, likeAdjustment: l })
+      toast.success('Displayed numbers updated.')
+      setOpen(false)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the adjustments.')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) {
+          setViewAdj(String(post.viewAdjustment ?? 0))
+          setLikeAdj(String(post.likeAdjustment ?? 0))
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 gap-1.5 px-2 text-xs"
-          aria-label={`Adjust displayed likes and views for “${post.title}”`}
+          aria-label={`Adjust displayed numbers for “${post.title}”`}
         >
           <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" /> Numbers
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[19rem] space-y-4">
-        <div>
-          <p className="text-sm font-semibold">Displayed numbers</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Members see the <span className="font-medium text-foreground">shown</span> counts. Real
-            activity and analytics are never modified; every change is audit-logged.
-          </p>
-        </div>
-        <div className="space-y-4 border-t pt-3">
-          <CounterControls post={post} kind="likes" onSaved={onSaved} />
-        </div>
-        <div className="space-y-4 border-t pt-3">
-          <CounterControls post={post} kind="views" onSaved={onSaved} />
+      <PopoverContent align="end" className="w-80">
+        <div className="space-y-3">
+          <div>
+            <p className="text-sm font-semibold">Displayed numbers</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Displayed = real + adjustment. Real member activity is never modified.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor={`adj-views-${post.id}`} className="text-xs text-muted-foreground">
+                View adjustment
+              </Label>
+              <Input
+                id={`adj-views-${post.id}`}
+                type="number"
+                value={viewAdj}
+                onChange={(e) => setViewAdj(e.target.value)}
+                dir="ltr"
+              />
+              <p className="text-[11px] text-muted-foreground tabular-nums">
+                {(post.viewsReal ?? 0).toLocaleString()} real →{' '}
+                <span className="font-medium text-foreground">
+                  {Math.max(0, (post.viewsReal ?? 0) + (Number.parseInt(viewAdj, 10) || 0)).toLocaleString()}
+                </span>{' '}
+                shown
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`adj-likes-${post.id}`} className="text-xs text-muted-foreground">
+                Like adjustment
+              </Label>
+              <Input
+                id={`adj-likes-${post.id}`}
+                type="number"
+                value={likeAdj}
+                onChange={(e) => setLikeAdj(e.target.value)}
+                dir="ltr"
+              />
+              <p className="text-[11px] text-muted-foreground tabular-nums">
+                {(post.likesReal ?? 0).toLocaleString()} real →{' '}
+                <span className="font-medium text-foreground">
+                  {Math.max(0, (post.likesReal ?? 0) + (Number.parseInt(likeAdj, 10) || 0)).toLocaleString()}
+                </span>{' '}
+                shown
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setOpen(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={save} disabled={saving} className="bg-emerald-600 text-white hover:bg-emerald-700">
+              {saving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
         </div>
       </PopoverContent>
     </Popover>
@@ -1710,7 +1756,7 @@ function AiReplyDialog({ post, onClose }: { post: AdminPost; onClose: () => void
     setPhase('posting')
     try {
       await apiJson('/api/admin/ai/post', 'POST', { postId: post.id, content: trimmed })
-      toast.success('AI response published — it appears in the post’s AI responses.')
+      toast.success('AI reply published — it appears in Reply moderation.')
       onClose()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not post the AI reply.')
@@ -1727,8 +1773,7 @@ function AiReplyDialog({ post, onClose }: { post: AdminPost; onClose: () => void
           </DialogTitle>
           <DialogDescription>
             Draft an assistant reply for “{post.title || 'Untitled'}” — it is posted as the
-            internal Muxamil AI account and surfaces only in the admin AI-activity
-            disclosure (members never see AI labels).
+            Muxamil AI account and shows an AI badge to everyone.
           </DialogDescription>
         </DialogHeader>
 

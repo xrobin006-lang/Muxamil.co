@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from 'react'
 import { io, type Socket } from 'socket.io-client'
-import { getSessionToken } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
 import type { SessionUser } from '@/lib/types'
@@ -55,6 +54,7 @@ export function getSocket(): Socket | null {
 export function useRealtime(user: SessionUser | null) {
   const incrementUnreadNotifications = useAppStore((s) => s.incrementUnreadNotifications)
   const setUnreadMessages = useAppStore((s) => s.setUnreadMessages)
+  const incrementDmUnread = useAppStore((s) => s.incrementDmUnread)
   const unreadMessages = useAppStore((s) => s.unreadMessages)
   const unreadRef = useRef(unreadMessages)
   // Latest user for handlers, WITHOUT re-running the connection effect on
@@ -76,10 +76,6 @@ export function useRealtime(user: SessionUser | null) {
 
     refCount += 1
     if (!socket) {
-      // Bearer fallback for iframe preview contexts where the session cookie
-      // is blocked — the socket handshake carries the same signed JWT via the
-      // `auth` payload and the service verifies it with the same secret.
-      const token = getSessionToken()
       socket = io('/?XTransformPort=3003', {
         transports: ['websocket', 'polling'],
         reconnection: true,
@@ -87,7 +83,6 @@ export function useRealtime(user: SessionUser | null) {
         reconnectionDelay: 1000,
         timeout: 10000,
         withCredentials: true,
-        ...(token ? { auth: { token } } : {}),
       })
       replayListeners(socket)
     }
@@ -98,6 +93,20 @@ export function useRealtime(user: SessionUser | null) {
     const onNotification = () => incrementUnreadNotifications()
     const onAdminMessage = () => {
       if (userRef.current?.role === 'admin') setUnreadMessages(unreadRef.current + 1)
+    }
+    // Verified-user DM: raise the nav badge for incoming messages while the
+    // dm view is closed. While it is open, DmView recomputes the badge from
+    // its authoritative inbox list (and marks open threads read), so the
+    // global increment would double-count and is skipped.
+    const onDmMessage = (payload: unknown) => {
+      const data = payload as { message?: { senderId?: unknown }; conversationId?: unknown }
+      const senderId = data?.message?.senderId
+      if (typeof senderId !== 'string' || senderId === userRef.current?.id) return
+      if (useAppStore.getState().view.name === 'dm') return
+      // Muted conversations don't raise the nav badge.
+      const muted = useAppStore.getState().dmMutedIds
+      if (typeof data?.conversationId === 'string' && muted.includes(data.conversationId)) return
+      incrementDmUnread()
     }
     const onPresenceState = (payload: unknown) => {
       const data = payload as { online?: string[]; adminOnline?: boolean }
@@ -116,6 +125,7 @@ export function useRealtime(user: SessionUser | null) {
 
     s.on('notification:new', onNotification)
     s.on('message:new', onAdminMessage)
+    s.on('dm:new-message', onDmMessage)
     s.on('presence:state', onPresenceState)
     s.on('presence:update', onPresenceUpdate)
 
@@ -128,6 +138,7 @@ export function useRealtime(user: SessionUser | null) {
     return () => {
       s.off('notification:new', onNotification)
       s.off('message:new', onAdminMessage)
+      s.off('dm:new-message', onDmMessage)
       s.off('presence:state', onPresenceState)
       s.off('presence:update', onPresenceUpdate)
       s.off('connect', requestSnapshot)
@@ -139,7 +150,7 @@ export function useRealtime(user: SessionUser | null) {
         usePresenceStore.getState().reset()
       }
     }
-  }, [userId, incrementUnreadNotifications, setUnreadMessages])
+  }, [userId, incrementUnreadNotifications, setUnreadMessages, incrementDmUnread])
 
   return socket
 }

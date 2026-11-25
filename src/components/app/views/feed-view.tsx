@@ -35,23 +35,6 @@ const PAGE_LIMIT = 10
 const SEARCH_DEBOUNCE_MS = 400
 const MAX_PINNED = 3
 
-/**
- * AI-activity ids whose realtime event has already been applied to a feed
- * list. Module-level so remounts never double-count. Capped at 500 entries
- * (oldest evicted first — Set iterates in insertion order).
- */
-const seenAiActivityIds = new Set<string>()
-
-function rememberAiActivityId(id: string): boolean {
-  if (seenAiActivityIds.has(id)) return false
-  if (seenAiActivityIds.size >= 500) {
-    const oldest = seenAiActivityIds.values().next().value
-    if (typeof oldest === 'string') seenAiActivityIds.delete(oldest)
-  }
-  seenAiActivityIds.add(id)
-  return true
-}
-
 /** Append a page while keeping first-seen order and deduplicating by id. */
 function mergeById(prev: PostDTO[], incoming: PostDTO[]): PostDTO[] {
   if (incoming.length === 0) return prev
@@ -153,72 +136,6 @@ export default function FeedView() {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const filtersActive = q !== '' || categorySlug !== null
-
-  const clearFilters = useCallback(() => {
-    setSearchInput('')
-    setQ('')
-    setCategorySlug(null)
-  }, [])
-
-  // ---- deep-link focus (view.focusPostId) ---------------------------------
-  const focusPostId = useAppStore((s) => (s.view.name === 'feed' ? s.view.focusPostId : undefined))
-  const [highlightPostId, setHighlightPostId] = useState<string | null>(null)
-  /** Focus ids already handled — consumed locally so they never re-trigger. */
-  const handledFocusRef = useRef<string | null>(null)
-  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  /** Scroll the card into view and ring it briefly (~2.5s). */
-  const focusOnPost = useCallback((postId: string) => {
-    // Double rAF — wait for React to commit the (possibly just-added) card.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document
-          .getElementById(`post-card-${postId}`)
-          ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      })
-    })
-    setHighlightPostId(postId)
-    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
-    highlightTimerRef.current = setTimeout(() => setHighlightPostId(null), 2500)
-  }, [])
-
-  useEffect(
-    () => () => {
-      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
-    },
-    [],
-  )
-
-  useEffect(() => {
-    if (!focusPostId || handledFocusRef.current === focusPostId) return
-    if (loading) return // wait for whatever load is currently in flight
-    if (posts.some((p) => p.id === focusPostId) || pinned.some((p) => p.id === focusPostId)) {
-      handledFocusRef.current = focusPostId
-      focusOnPost(focusPostId)
-      return
-    }
-    if (filtersActive) {
-      // The target may be filtered out — reset to the default feed; this
-      // effect re-runs once the reload lands (handledFocusRef still unset).
-      clearFilters()
-      return
-    }
-    // Default feed and still missing (e.g. an older post beyond page one) —
-    // fetch it directly and prepend. Mark consumed either way so a 404
-    // (deleted/unpublished target) never loops.
-    handledFocusRef.current = focusPostId
-    apiGet<{ post: PostDTO }>(`/api/posts/${focusPostId}`)
-      .then((data) => {
-        const post = data?.post
-        if (!post?.id) return
-        setPosts((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
-        focusOnPost(post.id)
-      })
-      .catch(() => {
-        /* deep-link target no longer exists — nothing to focus */
-      })
-  }, [focusPostId, loading, posts, pinned, filtersActive, focusOnPost, clearFilters])
-
   const canLoadMore = sort === 'latest' ? nextCursor !== null : popularHasMore
 
   useEffect(() => {
@@ -236,6 +153,15 @@ export default function FeedView() {
         /* chips degrade to "All" only — the feed itself still works */
       })
   }, [])
+
+  // Admins changing categories/banners/layout refetches the chips live.
+  useSocketEvent('categories:changed', () => {
+    apiGet<CategoriesResponse>('/api/categories')
+      .then((data) => setCategories(data.categories))
+      .catch(() => {
+        /* keep the chips we already have */
+      })
+  })
 
   const buildParams = useCallback(
     (extra?: { cursor?: string; popularPage?: number }) => {
@@ -343,12 +269,17 @@ export default function FeedView() {
   useSocketEvent('feed:new-post', (payload) => {
     const post = payload as PostDTO
     if (!post?.id) return
-    if (post.isPinned && !filtersActive) {
-      setPinned((prev) =>
-        prev.some((p) => p.id === post.id) ? prev : [post, ...prev].slice(0, MAX_PINNED),
-      )
-    } else {
-      setPosts((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+    // When the feed is filtered (search/category), a raw new post doesn't
+    // necessarily match the filter — don't inject it into the visible list.
+    // The toast below still informs the user; the next unfiltered load shows it.
+    if (!filtersActive) {
+      if (post.isPinned) {
+        setPinned((prev) =>
+          prev.some((p) => p.id === post.id) ? prev : [post, ...prev].slice(0, MAX_PINNED),
+        )
+      } else {
+        setPosts((prev) => (prev.some((p) => p.id === post.id) ? prev : [post, ...prev]))
+      }
     }
     toast('New official post', {
       description:
@@ -361,6 +292,29 @@ export default function FeedView() {
     if (!id) return
     setPosts((prev) => prev.filter((p) => p.id !== id))
     setPinned((prev) => prev.filter((p) => p.id !== id))
+  })
+
+  // A post was permanently deleted on the admin side (cascade route) — the
+  // row is gone entirely, so it leaves the feed and the pinned rail too.
+  useSocketEvent('feed:post-hard-deleted', (payload) => {
+    const { id } = payload as { id: string }
+    if (!id) return
+    setPosts((prev) => prev.filter((p) => p.id !== id))
+    setPinned((prev) => prev.filter((p) => p.id !== id))
+  })
+
+  // A whole category (and all its posts) was cascade-deleted — every listed
+  // post of that batch leaves the feed/pinned rail at once.
+  useSocketEvent('feed:posts-bulk-deleted', (payload) => {
+    const { postIds } = payload as { postIds?: string[] }
+    if (!postIds || postIds.length === 0) {
+      // No explicit list (older payload) — fall back to a silent refetch.
+      void loadFeed()
+      return
+    }
+    const gone = new Set(postIds)
+    setPosts((prev) => prev.filter((p) => !gone.has(p.id)))
+    setPinned((prev) => prev.filter((p) => !gone.has(p.id)))
   })
 
   // A scheduled post just reached its publication time (server-side
@@ -431,39 +385,6 @@ export default function FeedView() {
     }
   })
 
-  // New AI activity anywhere bumps the matching card's internal AI count
-  // (once per activity id) so the admin-only disclosure renders live.
-  // There is no comment count — the Comments feature does not exist.
-  useSocketEvent('ai:activity', (payload) => {
-    const data = payload as { postId?: string; commentId?: string; comment?: { id?: string } }
-    const postId = data?.postId
-    const activityId = data?.commentId ?? data?.comment?.id
-    if (!postId || !activityId) return
-    if (!rememberAiActivityId(activityId)) return
-    const bump = (list: PostDTO[]) =>
-      list.map((p) =>
-        p.id === postId ? { ...p, aiCommentsCount: p.aiCommentsCount + 1 } : p,
-      )
-    setPosts(bump)
-    setPinned(bump)
-  })
-
-  // Live like-count sync from other viewers (DB-backed counts; own
-  // optimistic state is already applied by the card).
-  useSocketEvent('likes:new', (payload) => {
-    const data = payload as { postId?: string; userId?: string; likesCount?: number }
-    const postId = data?.postId
-    if (!postId || data.userId === user.id) return
-    const sync = (list: PostDTO[]) =>
-      list.map((p) =>
-        p.id === postId && typeof data.likesCount === 'number'
-          ? { ...p, likesCount: Math.max(0, data.likesCount) }
-          : p,
-      )
-    setPosts(sync)
-    setPinned(sync)
-  })
-
   const handleDelete = async (postId: string) => {
     if (deleting) return
     if (!window.confirm('Unpublish this post? It will be hidden from the feed and kept as a draft.')) return
@@ -480,6 +401,12 @@ export default function FeedView() {
     }
   }
 
+  const clearFilters = () => {
+    setSearchInput('')
+    setQ('')
+    setCategorySlug(null)
+  }
+
   const pinnedIds = new Set(pinned.map((p) => p.id))
   const visiblePosts = filtersActive ? posts : posts.filter((p) => !pinnedIds.has(p.id))
   const nothingAtAll = visiblePosts.length === 0 && (filtersActive || pinned.length === 0)
@@ -488,7 +415,6 @@ export default function FeedView() {
     <PostCard
       key={post.id}
       post={post}
-      highlight={highlightPostId === post.id}
       onDelete={user.role === 'admin' ? handleDelete : undefined}
       onAuthorClick={(authorId) => navigate({ name: 'user', userId: authorId })}
       onChanged={(patch) => syncPost(post.id, patch)}

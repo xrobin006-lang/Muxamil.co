@@ -3,7 +3,6 @@ import { supabase } from '@/lib/supabase'
 import { ok, guard, errors } from '@/lib/api-helpers'
 import { requireAdmin } from '@/lib/auth'
 import type { AttachmentDTO, CtaButtonDTO, PostDTO } from '@/lib/types'
-import { AI_ACCOUNT_USERNAME } from '@/lib/types'
 
 /** PostDTO + the admin-only display-override adjustments. */
 type AdminPostDTO = PostDTO & {
@@ -48,7 +47,6 @@ type PostRow = {
     role: string | null
   } | null
   mux_post_attachments: AttachmentRow[] | null
-  mux_post_reactions: { emoji: string; user_id: string }[] | null
 }
 
 const ADMIN_POST_SELECT =
@@ -57,8 +55,7 @@ const ADMIN_POST_SELECT =
   'likes_count,likes_real,like_count_adjustment,' +
   'category:mux_categories!mux_posts_category_id_fkey(id,name,slug,color),' +
   'author:mux_profiles!mux_posts_author_id_fkey(id,full_name,username,avatar_url,role),' +
-  'mux_post_attachments(id,file_name,file_url,file_type,mime_type,file_size,sort_order),' +
-  'mux_post_reactions(emoji,user_id)'
+  'mux_post_attachments(id,file_name,file_url,file_type,mime_type,file_size,sort_order)'
 
 /** Effective status: legacy rows with NULL status fall back to is_published. */
 function effectiveStatus(p: { status: string | null; is_published: boolean | null }): string {
@@ -72,11 +69,9 @@ function effectiveStatus(p: { status: string | null; is_published: boolean | nul
 function adminPostOut(
   p: PostRow,
   extras: {
-    aiCommentsCount: number
+    commentsCount: number
     isLiked: boolean
     isSaved: boolean
-    /** The AI system account's reaction token, when present (AI activity). */
-    aiReaction?: string | null
   }
 ): AdminPostDTO {
   const attachments: AttachmentDTO[] = []
@@ -133,8 +128,7 @@ function adminPostOut(
     likesReal: p.likes_real ?? 0,
     viewAdjustment: p.view_count_adjustment ?? 0,
     likeAdjustment: p.like_count_adjustment ?? 0,
-    aiCommentsCount: extras.aiCommentsCount,
-    aiReaction: extras.aiReaction ?? null,
+    commentsCount: extras.commentsCount,
     category: p.category
       ? {
           id: p.category.id,
@@ -178,7 +172,7 @@ function statusFilter(status: string): string | null {
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const statusParam = req.nextUrl.searchParams.get('status') || 'all'
     const status = ['all', 'published', 'draft', 'scheduled'].includes(statusParam)
@@ -220,19 +214,16 @@ export async function GET(req: NextRequest) {
     const rows = (data ?? []) as unknown as PostRow[]
     const postIds = rows.map((r) => r.id)
 
-    // aiCommentsCount (AI-authored replies — the ONLY discussion surfacing)
-    // + the admin's own like/save state, batched over the page. The AI
-    // account's reaction (AI activity) is attributed separately from member
-    // likes. There is NO comment count — the Comments feature does not exist.
-    let aiCommentsByPost = new Map<string, number>()
+    // commentsCount (visible comments — same number members see) + the admin's
+    // own like/save state, batched over the page.
+    let commentsByPost = new Map<string, number>()
     let likedSet = new Set<string>()
     let savedSet = new Set<string>()
-    let aiProfileId: string | null = null
     if (postIds.length > 0) {
-      const [commentsRes, likesRes, savesRes, aiProfile] = await Promise.all([
+      const [commentsRes, likesRes, savesRes] = await Promise.all([
         supabase
           .from('mux_comments')
-          .select('post_id,author:mux_profiles!mux_comments_user_id_fkey(username)')
+          .select('post_id')
           .eq('is_hidden', false)
           .in('post_id', postIds)
           .limit(5000),
@@ -246,24 +237,12 @@ export async function GET(req: NextRequest) {
           .select('post_id')
           .eq('user_id', admin.id)
           .in('post_id', postIds),
-        supabase
-          .from('mux_profiles')
-          .select('id')
-          .eq('username', AI_ACCOUNT_USERNAME)
-          .maybeSingle(),
       ])
       if (commentsRes.error) throw new Error(commentsRes.error.message)
       if (likesRes.error) throw new Error(likesRes.error.message)
       if (savesRes.error) throw new Error(savesRes.error.message)
-      if (aiProfile.error) throw new Error(aiProfile.error.message)
-      aiProfileId = (aiProfile.data as { id: string } | null)?.id ?? null
-      for (const c of (commentsRes.data ?? []) as unknown as {
-        post_id: string
-        author: { username: string | null } | null
-      }[]) {
-        if (c.author?.username === AI_ACCOUNT_USERNAME) {
-          aiCommentsByPost.set(c.post_id, (aiCommentsByPost.get(c.post_id) ?? 0) + 1)
-        }
+      for (const c of (commentsRes.data ?? []) as { post_id: string }[]) {
+        commentsByPost.set(c.post_id, (commentsByPost.get(c.post_id) ?? 0) + 1)
       }
       likedSet = new Set(
         ((likesRes.data ?? []) as { post_id: string }[]).map((r) => r.post_id)
@@ -276,12 +255,9 @@ export async function GET(req: NextRequest) {
     const total = counts[status as keyof typeof counts] ?? counts.all
     const posts = rows.map((r) =>
       adminPostOut(r, {
-        aiCommentsCount: aiCommentsByPost.get(r.id) ?? 0,
+        commentsCount: commentsByPost.get(r.id) ?? 0,
         isLiked: likedSet.has(r.id),
         isSaved: savedSet.has(r.id),
-        aiReaction: aiProfileId
-          ? (r.mux_post_reactions ?? []).find((x) => x.user_id === aiProfileId)?.emoji ?? null
-          : null,
       })
     )
 

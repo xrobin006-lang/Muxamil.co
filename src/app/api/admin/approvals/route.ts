@@ -65,7 +65,7 @@ function attachmentOut(a: AttachmentRow): AttachmentDTO {
 export async function GET() {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { data, error } = await supabase
       .from('mux_community_posts')

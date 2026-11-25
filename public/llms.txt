@@ -1,0 +1,18 @@
+# Muxamil.co
+
+> Muxamil.co combines a community platform with Work Guideline resources.
+
+## Main pages
+
+- Homepage: https://muxamil.co/
+- Work Guideline: https://muxamil.co/work-guideline
+
+## Platform
+
+Muxamil provides community features, posts, member profiles and messaging.
+Work Guideline provides digital rewards programs, tutorials and submission features.
+
+## Crawling
+
+- Prefer the canonical HTTPS domain.
+- API endpoints are not public content pages.

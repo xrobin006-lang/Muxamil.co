@@ -1,9 +1,8 @@
-import { NextRequest, after } from 'next/server'
+import { NextRequest } from 'next/server'
 import { supabase, freshId, nowIso, slugify, storagePathFromUrl } from '@/lib/supabase'
-import { ok, fail, guard, errors } from '@/lib/api-helpers'
+import { ok, fail, guard, errors, parseKeysetCursor } from '@/lib/api-helpers'
 import { getActiveUser, requireAdmin } from '@/lib/auth'
-import { emitRealtime, notifyNewPost } from '@/lib/realtime'
-import { runAiEngagementForPost } from '@/lib/ai-automation'
+import { emitRealtime } from '@/lib/realtime'
 import { officialPostSchema, sanitizeLink } from '@/lib/validators'
 import { POST_SELECT, decoratePosts, type PostRowFull } from '@/lib/post-dto'
 
@@ -72,19 +71,15 @@ export async function GET(req: NextRequest) {
       rows = (data ?? []) as unknown as PostRowFull[]
       hasMore = rows.length > limit
       rows = rows.slice(0, limit)
-      // AI activity fields are admin-only (spec §11) — members get zeros.
-      const posts = await decoratePosts(rows, user.id, user.role === 'admin')
+      const posts = await decoratePosts(rows, user.id, { includeReal: user.role === 'admin' })
       return ok({ posts, nextCursor: null, hasMore })
     }
 
     // Latest: keyset cursor pagination on (created_at, id).
-    if (cursor) {
-      const sep = cursor.lastIndexOf('|')
-      if (sep > 0) {
-        const ts = cursor.slice(0, sep)
-        const id = cursor.slice(sep + 1)
-        query = query.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${id})`)
-      }
+    const parsedCursor = parseKeysetCursor(cursor)
+    if (parsedCursor) {
+      const { ts, id } = parsedCursor
+      query = query.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${id})`)
     }
     const { data, error } = await query
       .order('created_at', { ascending: false })
@@ -100,8 +95,7 @@ export async function GET(req: NextRequest) {
     const nextCursor =
       hasMore && last ? `${new Date(last.created_at).toISOString()}|${last.id}` : null
 
-    // AI activity fields are admin-only (spec §11) — members get zeros.
-    const posts = await decoratePosts(pageRows, user.id, user.role === 'admin')
+    const posts = await decoratePosts(pageRows, user.id, { includeReal: user.role === 'admin' })
     return ok({ posts, nextCursor, hasMore })
   })
 }
@@ -250,29 +244,11 @@ export async function POST(req: NextRequest) {
       .order('sort_order', { referencedTable: 'mux_post_attachments', ascending: true })
       .maybeSingle()
     if (created) {
-      const [full] = await decoratePosts([created as unknown as PostRowFull], admin.id)
+      const [full] = await decoratePosts([created as unknown as PostRowFull], admin.id, { includeReal: true })
       // Realtime only fires when the post is live immediately — drafts and
       // scheduled posts stay silent until they are actually published.
       if (isPublished) {
         await emitRealtime({ event: 'feed:new-post', room: 'all', payload: full })
-        // NEW_POST notification fan-out (spec §33): one DB row per active
-        // member + realtime + push. Idempotent (uuidv5 ids) so a retry or
-        // double-click never duplicates. Failure never blocks the publish.
-        try {
-          await notifyNewPost({
-            id: postId,
-            title: input.title,
-            slug: (created as { slug?: string | null }).slug ?? slugify(input.title),
-            actorId: admin.id,
-          })
-        } catch (err) {
-          console.error('[posts] new-post notification fan-out failed:', (err as Error).message)
-        }
-        // AI auto-engagement (spec §37) — strictly after the response so a
-        // slow/failing LLM can never block or roll back the publication.
-        after(() => {
-          runAiEngagementForPost(postId).catch(() => {})
-        })
       }
       return ok({ post: full })
     }

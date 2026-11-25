@@ -101,11 +101,11 @@ export function Lightbox({
               {index + 1} / {images.length}
             </span>
           )}
-          <a href={current.url} download={current.fileName} target="_blank" rel="noopener noreferrer">
-            <Button variant="secondary" size="sm" className="gap-1.5 bg-white/10 text-white hover:bg-white/20">
+          <Button variant="secondary" size="sm" asChild className="gap-1.5 bg-white/10 text-white hover:bg-white/20">
+            <a href={current.url} download={current.fileName} target="_blank" rel="noopener noreferrer">
               <Download className="h-4 w-4" /> Download
-            </Button>
-          </a>
+            </a>
+          </Button>
         </div>
       </div>
     </div>

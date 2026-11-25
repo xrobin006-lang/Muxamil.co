@@ -14,6 +14,7 @@ type ProfileRow = {
   status: string
   is_verified: boolean
   created_at: string
+  appearance: Record<string, unknown> | null
 }
 
 type CommunityRow = {
@@ -40,7 +41,7 @@ function sanitizeSearch(q: string): string {
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const q = sanitizeSearch(req.nextUrl.searchParams.get('q') || '')
     const filter = req.nextUrl.searchParams.get('filter') || 'all' // all|users|verified|blocked|admins
@@ -53,7 +54,7 @@ export async function GET(req: NextRequest) {
     let query = supabase
       .from('mux_profiles')
       .select(
-        'id,email,full_name,username,avatar_url,bio,role,status,is_verified,created_at',
+        'id,email,full_name,username,avatar_url,bio,role,status,is_verified,created_at,appearance',
         { count: 'exact' },
       )
       .order('created_at', { ascending: false })
@@ -91,6 +92,7 @@ export async function GET(req: NextRequest) {
     return ok({
       users: users.map((u) => {
         const community = communityByOwner.get(u.id) ?? null
+        const restricted = u.appearance?.dm_restricted
         return {
           id: u.id,
           fullName: u.full_name ?? '',
@@ -101,6 +103,7 @@ export async function GET(req: NextRequest) {
           role: u.role === 'admin' ? 'admin' : 'user',
           isVerified: !!u.is_verified,
           isBlocked: u.status === 'blocked',
+          chatRestricted: !!(restricted && typeof restricted === 'object'),
           createdAt: u.created_at,
           community: community
             ? { id: community.id, name: community.name, isActive: community.is_active }

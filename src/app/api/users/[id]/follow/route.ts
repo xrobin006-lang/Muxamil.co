@@ -3,6 +3,7 @@ import { supabase, freshId, nowIso, fetchSiteSettings, type MuxProfileRow } from
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
 import { notifyUser } from '@/lib/realtime'
+import { rateLimit, clientKeyFrom } from '@/lib/rate-limit'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -18,13 +19,21 @@ async function resolveTarget(param: string): Promise<MuxProfileRow | null> {
 
 /**
  * Toggle the requesting user's follow on another member (contract §12).
- * Self-follow is rejected; the follow_enabled gate is enforced; the target
- * gets a 'follow' notification on follow (never on unfollow).
+ * Self-follow is rejected; admin accounts can NEVER be followed (checked
+ * server-side from the target's live profile — role is never trusted from
+ * the client); the follow_enabled gate is enforced; the target gets a
+ * 'follow' notification on follow (never on unfollow).
  */
-export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const user = await getActiveUser()
     if (!user) return errors.unauthorized()
+
+    // Anti-spam: rapid follow/unfollow toggling spams the target with
+    // notifications — cap toggles per user per minute.
+    if (!rateLimit('follow-toggle', clientKeyFrom(req, user.id), 20, 60_000)) {
+      return fail('You are doing that too quickly. Please wait a moment.', 429)
+    }
 
     const settings = await fetchSiteSettings()
     if (!settings.follow_enabled) {
@@ -34,6 +43,10 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
     const { id } = await ctx.params
     const target = await resolveTarget(id)
     if (!target || target.status === 'blocked') return errors.notFound('User')
+    // Admin accounts are not followable — rejected before any DB write.
+    if (target.role === 'admin') {
+      return fail('Following admin accounts is not supported.')
+    }
     if (target.id === user.id) {
       return fail('You cannot follow yourself.')
     }

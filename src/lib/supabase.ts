@@ -28,8 +28,8 @@ export const SUPABASE_URL_RESOLVED = SUPABASE_URL
 /** Storage buckets of the Muxamil.co platform (existing conventions). */
 export const BUCKETS = {
   avatar: 'mux-avatars', // public:  profiles/{userId}/{ts}-{rand}-{name}
-  banner: 'mux-banners', // public:  profiles/{userId}/{ts}-{rand}-{name}
   postImage: 'mux-post-images', // public
+  banner: 'mux-banners', // public profile banners
   postVideo: 'mux-post-videos', // public
   postDocument: 'mux-post-documents', // public
   message: 'mux-message-attachments', // PRIVATE: messages/{senderId}/{ts}-{rand}-{name}
@@ -53,11 +53,13 @@ export async function storageUpload(
   return path
 }
 
-/** Long-lived signed URL for private objects (message attachments). */
+/** Short-lived signed URL for private objects (message attachments).
+ *  24h default: read paths re-mint on every fetch, so a leaked URL stops
+ *  working quickly instead of living for a year. */
 export async function storageSignedUrl(
   bucket: string,
   path: string,
-  expiresIn = 60 * 60 * 24 * 365 // 1 year, matching existing rows
+  expiresIn = 60 * 60 * 24
 ): Promise<string> {
   const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, expiresIn)
   if (error || !data?.signedUrl) throw new Error(`Signing failed: ${error?.message}`)
@@ -77,6 +79,45 @@ export function storagePathFromUrl(url: string | null | undefined): string | nul
   if (!url) return null
   const m = url.match(/\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+?)(?:\?|$)/)
   return m ? decodeURIComponent(m[1]) : null
+}
+
+/** Origin (scheme://host) of THIS project's storage service — the only host
+ *  service-key storage operations may ever target. */
+const SUPABASE_STORAGE_ORIGIN = new URL(SUPABASE_URL).origin
+
+/**
+ * Hardened URL → storage-target parser for DESTRUCTIVE operations (delete /
+ * copy). Unlike storagePathFromUrl (display-oriented), this only accepts URLs
+ * that point at THIS platform's storage origin, and — when given — only the
+ * allowed buckets and the required path prefix. Anything else returns null so
+ * a crafted attachment URL can never direct a service-key remove()/copy() at
+ * a foreign host, another bucket (e.g. the private message bucket), or
+ * another user's objects.
+ */
+export function storageTargetFromUrl(
+  url: string | null | undefined,
+  opts: { buckets?: readonly string[]; pathPrefix?: string } = {}
+): { bucket: string; path: string } | null {
+  if (!url) return null
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  if (u.origin !== SUPABASE_STORAGE_ORIGIN) return null
+  const m = u.pathname.match(/^\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/]+)\/(.+)$/)
+  if (!m) return null
+  const bucket = m[1]
+  let path: string
+  try {
+    path = decodeURIComponent(m[2])
+  } catch {
+    return null
+  }
+  if (opts.buckets && !opts.buckets.includes(bucket)) return null
+  if (opts.pathPrefix && !path.startsWith(opts.pathPrefix)) return null
+  return { bucket, path }
 }
 
 /** Generate the storage-safe object path used across the platform. */
@@ -111,6 +152,20 @@ export type MuxProfileRow = {
   created_at: string
   updated_at: string
   last_active_at: string | null
+  /** Flexible per-profile JSON (legacy column) — holds the admin-only
+   *  `displayed_followers` display override; unused for normal members. */
+  appearance: Record<string, unknown> | null
+}
+
+/** Focal/zoom metadata for DP + banner customization (0..1 focal, 1..4 zoom). */
+export type ImageFit = { x: number; y: number; scale: number }
+
+function readFit(v: unknown): ImageFit | null {
+  if (!v || typeof v !== 'object') return null
+  const f = v as { x?: unknown; y?: unknown; scale?: unknown }
+  if (typeof f.x !== 'number' || typeof f.y !== 'number' || typeof f.scale !== 'number') return null
+  if (f.x < 0 || f.x > 1 || f.y < 0 || f.y > 1 || f.scale < 1 || f.scale > 4) return null
+  return { x: f.x, y: f.y, scale: f.scale }
 }
 
 /** Application-level user consumed by routes (camelCase, app semantics). */
@@ -126,9 +181,25 @@ export type AppUser = {
   isVerified: boolean
   isBlocked: boolean
   createdAt: string
+  /** Banner focal point (appearance.banner_fit) — drives responsive cover display. */
+  bannerFit: ImageFit | null
+  /** DP crop metadata (appearance.avatar_fit) — editor re-adjustment only. */
+  avatarFit: ImageFit | null
+  /** Stored originals so the crop can be re-adjusted without quality loss. */
+  avatarOriginalUrl: string | null
+  bannerOriginalUrl: string | null
 }
 
 export function toAppUser(p: MuxProfileRow): AppUser {
+  const appearance = p.appearance ?? {}
+  const avatarOriginal =
+    typeof appearance.avatar_original === 'string' && /^https?:\/\//i.test(appearance.avatar_original)
+      ? appearance.avatar_original
+      : null
+  const bannerOriginal =
+    typeof appearance.banner_original === 'string' && /^https?:\/\//i.test(appearance.banner_original)
+      ? appearance.banner_original
+      : null
   return {
     id: p.id,
     email: p.email,
@@ -141,6 +212,10 @@ export function toAppUser(p: MuxProfileRow): AppUser {
     isVerified: !!p.is_verified,
     isBlocked: p.status === 'blocked',
     createdAt: p.created_at,
+    bannerFit: readFit(appearance.banner_fit),
+    avatarFit: readFit(appearance.avatar_fit),
+    avatarOriginalUrl: avatarOriginal,
+    bannerOriginalUrl: bannerOriginal,
   }
 }
 

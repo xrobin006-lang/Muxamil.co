@@ -46,7 +46,7 @@ function sanitizeSearch(q: string): string {
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const page = Math.max(1, parseInt(req.nextUrl.searchParams.get('page') || '1', 10) || 1)
     const limit = Math.min(

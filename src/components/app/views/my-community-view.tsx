@@ -41,7 +41,7 @@ import {
 import { apiGet, apiJson, apiUpload } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
-import { formatBytes, formatCount, formatFullDate } from '@/lib/format'
+import { formatBytes, formatFullDate } from '@/lib/format'
 import type { CommunityDTO, CommunityPostDTO } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { UserAvatar } from '../components/user-avatar'
@@ -830,7 +830,7 @@ export default function MyCommunityView() {
           <img src={community.coverUrl} alt="" className="h-28 w-full object-cover sm:h-36" />
         ) : (
           <div
-            className="h-28 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-36"
+            className="h-28 bg-gradient-to-br from-primary/85 via-primary/60 to-primary/85 sm:h-36"
             aria-hidden="true"
           />
         )}
@@ -868,10 +868,10 @@ export default function MyCommunityView() {
             </p>
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Users className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              {formatCount(community.membersCount)} member{community.membersCount === 1 ? '' : 's'}
+              {community.membersCount.toLocaleString()} member{community.membersCount === 1 ? '' : 's'}
             </p>
             <p className="text-xs text-muted-foreground">
-              {formatCount(counts.all)} post{counts.all === 1 ? '' : 's'}
+              {counts.all} post{counts.all === 1 ? '' : 's'}
             </p>
             <StatusBadge status={community.isActive ? 'active' : 'inactive'} />
           </div>

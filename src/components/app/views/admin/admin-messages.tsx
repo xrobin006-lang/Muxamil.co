@@ -24,7 +24,14 @@ type ConversationsResponse = { conversations: ConversationDTO[] }
  * Admin chat inbox: a two-pane layout (conversation list + shared ChatWindow).
  * Mobile shows the list and swaps to the full-width chat on selection.
  */
-export default function AdminMessages({ initialConversationId }: { initialConversationId?: string }) {
+export default function AdminMessages({
+  initialConversationId,
+  initialUserId,
+}: {
+  initialConversationId?: string
+  /** Peer user id — opens the conversation with that member (e.g. “Open chat” from Users). */
+  initialUserId?: string
+}) {
   const user = useAppStore((s) => s.user)!
   const setUnreadMessages = useAppStore((s) => s.setUnreadMessages)
   const onlineIds = usePresenceStore((s) => s.onlineIds)
@@ -34,6 +41,8 @@ export default function AdminMessages({ initialConversationId }: { initialConver
   const [loadFailed, setLoadFailed] = useState(false)
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(initialConversationId ?? null)
+  /** Inbox filter: all conversations or only unread ones. */
+  const [unreadOnly, setUnreadOnly] = useState(false)
   /** userId -> isTyping (kept fresh by the socket handler below). */
   const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({})
 
@@ -99,6 +108,16 @@ export default function AdminMessages({ initialConversationId }: { initialConver
     if (initialConversationId) setSelectedId(initialConversationId)
   }, [initialConversationId])
 
+  // Deep link by member (e.g. “Open chat” on a user row) — once the inbox has
+  // loaded, open the conversation with that member, if one exists.
+  useEffect(() => {
+    if (!initialUserId || loading || conversations.length === 0) return
+    setSelectedId((current) => {
+      if (current) return current
+      return conversations.find((c) => c.userId === initialUserId)?.id ?? current
+    })
+  }, [initialUserId, loading, conversations])
+
   const handleSelect = useCallback(
     (id: string) => {
       setSelectedId(id)
@@ -161,11 +180,17 @@ export default function AdminMessages({ initialConversationId }: { initialConver
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return conversations
-    return conversations.filter(
-      (c) => c.userFullName.toLowerCase().includes(q) || c.username.toLowerCase().includes(q),
-    )
-  }, [conversations, search])
+    return conversations.filter((c) => {
+      if (unreadOnly && c.unreadCount === 0) return false
+      if (!q) return true
+      return c.userFullName.toLowerCase().includes(q) || c.username.toLowerCase().includes(q)
+    })
+  }, [conversations, search, unreadOnly])
+
+  const unreadConversations = useMemo(
+    () => conversations.filter((c) => c.unreadCount > 0).length,
+    [conversations],
+  )
 
   const selectedConvo = conversations.find((c) => c.id === selectedId) ?? null
 
@@ -189,6 +214,32 @@ export default function AdminMessages({ initialConversationId }: { initialConver
               className="pl-9"
               aria-label="Search conversations by name or username"
             />
+          </div>
+          <div className="mt-2 flex items-center gap-1.5" role="group" aria-label="Filter conversations">
+            {([
+              { value: false, label: 'All' },
+              { value: true, label: 'Unread' },
+            ] as const).map(({ value, label }) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => setUnreadOnly(value)}
+                aria-pressed={unreadOnly === value}
+                className={cn(
+                  'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  unreadOnly === value
+                    ? 'border-primary/30 bg-primary/10 text-primary'
+                    : 'border-border bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground',
+                )}
+              >
+                {label}
+                {value && unreadConversations > 0 && (
+                  <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums text-primary-foreground">
+                    {unreadConversations > 99 ? '99+' : unreadConversations}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -218,11 +269,13 @@ export default function AdminMessages({ initialConversationId }: { initialConver
           ) : filtered.length === 0 ? (
             <EmptyState
               icon={MessagesSquare}
-              title={search ? 'No matches' : 'No conversations yet'}
+              title={search || unreadOnly ? 'No matches' : 'No conversations yet'}
               description={
                 search
                   ? 'Try a different name or username.'
-                  : 'When members message you, their conversations will appear here.'
+                  : unreadOnly
+                    ? 'Nothing unread — you are all caught up.'
+                    : 'When members message you, their conversations will appear here.'
               }
             />
           ) : (

@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase'
-import type { AttachmentDTO, CtaButtonDTO, PostDTO } from '@/lib/types'
+import type { AttachmentDTO, CommentDTO, CtaButtonDTO, PostDTO } from '@/lib/types'
 import { AI_ACCOUNT_USERNAME } from '@/lib/types'
 
 // ---------------------------------------------------------------------------
@@ -33,37 +33,6 @@ export type CategoryEmbed = {
   color: string | null
 } | null
 
-export type ReactionRow = {
-  emoji: string
-  user_id: string
-}
-
-/**
- * Resolve the AI system account's profile id (cached for 10 minutes — the
- * account never changes). Used to attribute mux_post_reactions rows that
- * belong to AI activity (spec: AI activity must never mix with real member
- * likes / display overrides).
- */
-let aiProfileIdCache: { id: string; at: number } | null = null
-const AI_ID_TTL_MS = 10 * 60 * 1000
-
-async function resolveAiProfileId(): Promise<string | null> {
-  if (aiProfileIdCache && Date.now() - aiProfileIdCache.at < AI_ID_TTL_MS) {
-    return aiProfileIdCache.id
-  }
-  const { data } = await supabase
-    .from('mux_profiles')
-    .select('id')
-    .eq('username', AI_ACCOUNT_USERNAME)
-    .maybeSingle()
-  if (!data) return null
-  aiProfileIdCache = { id: (data as { id: string }).id, at: Date.now() }
-  return aiProfileIdCache.id
-}
-
-/** mux_polls embeds were REMOVED — polls are not a product feature.
- *  The dormant DB tables stay untouched (historical data preserved). */
-
 export type PostRowFull = {
   id: string
   title: string | null
@@ -84,7 +53,6 @@ export type PostRowFull = {
   author: AuthorRow | null
   category: CategoryEmbed
   mux_post_attachments: AttachmentRow[] | null
-  mux_post_reactions: ReactionRow[] | null
 }
 
 /** Select string covering every PostDTO field (embeds verified live). */
@@ -93,8 +61,7 @@ export const POST_SELECT =
   'created_at,updated_at,views_count,views_real,likes_count,likes_real,author_id,' +
   'author:mux_profiles!mux_posts_author_id_fkey(id,full_name,username,avatar_url,role),' +
   'category:mux_categories!mux_posts_category_id_fkey(id,name,slug,color),' +
-  'mux_post_attachments(id,file_name,file_url,file_type,mime_type,file_size,sort_order),' +
-  'mux_post_reactions(emoji,user_id)'
+  'mux_post_attachments(id,file_name,file_url,file_type,mime_type,file_size,sort_order)'
 
 /**
  * mux_post_attachments.file_type CHECK constraint only allows image|video|document
@@ -139,19 +106,13 @@ export function ctaButtonsFrom(attachments: AttachmentRow[] | null | undefined):
 
 /**
  * Map a mux_posts row (with embeds) to the full PostDTO.
- * Per-user flags, aiCommentsCount (AI disclosure only — the Comments
- * feature does not exist), like state and the AI account's reaction are
- * attached by `decoratePosts` (batch-fetched).
+ * Per-user flags and commentsCount come from `decoratePosts` (batch-fetched).
+ * Real engagement counts (viewsReal/likesReal) are included ONLY when
+ * `includeReal` is set (admin callers) — member responses never expose them.
  */
 export function postOut(
   p: PostRowFull,
-  ctx?: {
-    aiCommentsCount?: number
-    isLiked?: boolean
-    isSaved?: boolean
-    /** The AI system account's reaction token on this post, if any. */
-    aiReaction?: string | null
-  }
+  ctx?: { commentsCount?: number; isLiked?: boolean; isSaved?: boolean; includeReal?: boolean }
 ): PostDTO {
   const attachments = (p.mux_post_attachments ?? []).filter(
     (a) => a.mime_type !== 'cta'
@@ -170,10 +131,8 @@ export function postOut(
     updatedAt: p.updated_at,
     viewsCount: p.views_count ?? 0,
     likesCount: p.likes_count ?? 0,
-    viewsReal: p.views_real ?? 0,
-    likesReal: p.likes_real ?? 0,
-    aiCommentsCount: ctx?.aiCommentsCount ?? 0,
-    aiReaction: ctx?.aiReaction ?? null,
+    ...(ctx?.includeReal ? { viewsReal: p.views_real ?? 0, likesReal: p.likes_real ?? 0 } : {}),
+    commentsCount: ctx?.commentsCount ?? 0,
     category: p.category
       ? {
           id: p.category.id,
@@ -197,29 +156,23 @@ export function postOut(
 }
 
 /**
- * Batch decoration for a page of posts: aiCommentsCount (AI-authored,
- * non-hidden replies — internal, admin-only visibility per spec §11),
- * isLiked/isSaved for the requesting user, and the AI account's reaction
- * token. Runs at most 4 extra queries regardless of page size (AI id cached).
- *
- * When `includeAiActivity` is false (normal members), the AI count and AI
- * reaction fields are zeroed in the DTO — no AI metadata is ever sent to a
- * member's browser, matching the UI where members see no AI labels.
+ * Batch decoration for a page of posts: commentsCount (visible comments),
+ * isLiked and isSaved for the requesting user. Runs at most 3 extra queries
+ * regardless of page size. `opts.includeReal` (admin callers only) adds the
+ * real engagement counts to every DTO.
  */
 export async function decoratePosts(
   rows: PostRowFull[],
   viewerId: string | null,
-  includeAiActivity = true
+  opts?: { includeReal?: boolean }
 ): Promise<PostDTO[]> {
   if (rows.length === 0) return []
   const ids = rows.map((r) => r.id)
 
-  const [commentsRes, likesRes, savesRes, aiId] = await Promise.all([
+  const [commentsRes, likesRes, savesRes] = await Promise.all([
     supabase
       .from('mux_comments')
-      .select(
-        'post_id,author:mux_profiles!mux_comments_user_id_fkey(username)'
-      )
+      .select('post_id')
       .in('post_id', ids)
       .eq('is_hidden', false)
       .limit(5000),
@@ -237,45 +190,25 @@ export async function decoratePosts(
           .eq('user_id', viewerId)
           .in('post_id', ids)
       : Promise.resolve({ data: [], error: null as null }),
-    resolveAiProfileId(),
   ])
 
   if (commentsRes.error) throw new Error(commentsRes.error.message)
   if (likesRes.error) throw new Error(likesRes.error.message)
   if (savesRes.error) throw new Error(savesRes.error.message)
 
-  // Count ONLY AI-authored replies — the member comment count is gone with
-  // the Comments feature (spec §7/§9: no comment counts anywhere).
-  const aiCommentsCount: Record<string, number> = {}
-  // NOTE: the author embed is a single object at runtime (FK join) but
-  // supabase-js generics model it as an array — cast through unknown.
-  for (const r of (commentsRes.data ?? []) as unknown as {
-    post_id: string
-    author: { username: string | null } | null
-  }[]) {
-    if (r.author?.username === AI_ACCOUNT_USERNAME) {
-      aiCommentsCount[r.post_id] = (aiCommentsCount[r.post_id] ?? 0) + 1
-    }
+  const commentsCount: Record<string, number> = {}
+  for (const r of (commentsRes.data ?? []) as { post_id: string }[]) {
+    commentsCount[r.post_id] = (commentsCount[r.post_id] ?? 0) + 1
   }
   const likedSet = new Set(((likesRes.data ?? []) as { post_id: string }[]).map((r) => r.post_id))
   const savedSet = new Set(((savesRes.data ?? []) as { post_id: string }[]).map((r) => r.post_id))
 
-  // AI activity attribution: the AI account's reaction row (when present)
-  // is surfaced via aiReaction — never mixed into member likes or overrides.
-  const aiReactionByPost = new Map<string, string>()
-  if (aiId) {
-    for (const r of rows) {
-      const aiRow = (r.mux_post_reactions ?? []).find((x) => x.user_id === aiId)
-      if (aiRow) aiReactionByPost.set(r.id, aiRow.emoji)
-    }
-  }
-
   return rows.map((r) =>
     postOut(r, {
-      aiCommentsCount: includeAiActivity ? aiCommentsCount[r.id] ?? 0 : 0,
+      commentsCount: commentsCount[r.id] ?? 0,
       isLiked: likedSet.has(r.id),
       isSaved: savedSet.has(r.id),
-      aiReaction: includeAiActivity ? aiReactionByPost.get(r.id) ?? null : null,
+      ...(opts?.includeReal ? { includeReal: true } : {}),
     })
   )
 }
@@ -283,4 +216,123 @@ export async function decoratePosts(
 /** Attachments ordering (media first by sort_order, CTA rows last). */
 export function orderAttachments() {
   return { referencedTable: 'mux_post_attachments', ascending: true }
+}
+
+// ---------------------------------------------------------------------------
+// mux_comments row → CommentDTO (shared by comments routes)
+// ---------------------------------------------------------------------------
+
+export type CommentRow = {
+  id: string
+  post_id: string
+  parent_id: string | null
+  content: string
+  is_hidden: boolean | null
+  created_at: string
+  updated_at: string
+  user_id: string
+  author: {
+    id: string
+    full_name: string | null
+    username: string | null
+    avatar_url: string | null
+    is_verified: boolean | null
+    role: string | null
+  } | null
+}
+
+export const COMMENT_SELECT =
+  'id,post_id,parent_id,content,is_hidden,created_at,updated_at,user_id,' +
+  'author:mux_profiles!mux_comments_user_id_fkey(id,full_name,username,avatar_url,is_verified,role)'
+
+/** Map a comment row (with author embed) into CommentDTO; likes filled by caller. */
+export function commentOut(
+  c: CommentRow,
+  ctx?: { likesCount?: number; isLiked?: boolean; replies?: CommentDTO[] }
+): CommentDTO {
+  return {
+    id: c.id,
+    postId: c.post_id,
+    parentId: c.parent_id ?? null,
+    content: c.content,
+    isHidden: !!c.is_hidden,
+    isAi: c.author?.username === AI_ACCOUNT_USERNAME,
+    likesCount: ctx?.likesCount ?? 0,
+    isLiked: !!ctx?.isLiked,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    author: {
+      id: c.author?.id || c.user_id,
+      fullName: c.author?.full_name || '',
+      username: c.author?.username || '',
+      avatarUrl: c.author?.avatar_url ?? null,
+      isVerified: !!c.author?.is_verified,
+      role: c.author?.role || 'user',
+    },
+    ...(ctx?.replies ? { replies: ctx.replies } : {}),
+  }
+}
+
+/** Batch like-decoration + threading for a set of comment rows. */
+export async function decorateComments(
+  rows: CommentRow[],
+  viewerId: string | null
+): Promise<CommentDTO[]> {
+  if (rows.length === 0) return []
+  const ids = rows.map((r) => r.id)
+  const [likesAllRes, mineRes] = await Promise.all([
+    supabase.from('mux_comment_likes').select('comment_id').in('comment_id', ids).limit(5000),
+    viewerId
+      ? supabase
+          .from('mux_comment_likes')
+          .select('comment_id')
+          .eq('user_id', viewerId)
+          .in('comment_id', ids)
+      : Promise.resolve({ data: [], error: null as null }),
+  ])
+  if (likesAllRes.error) throw new Error(likesAllRes.error.message)
+  if (mineRes.error) throw new Error(mineRes.error.message)
+
+  const counts: Record<string, number> = {}
+  for (const r of (likesAllRes.data ?? []) as { comment_id: string }[]) {
+    counts[r.comment_id] = (counts[r.comment_id] ?? 0) + 1
+  }
+  const mine = new Set(((mineRes.data ?? []) as { comment_id: string }[]).map((r) => r.comment_id))
+
+  const base = rows.map((r) =>
+    commentOut(r, { likesCount: counts[r.id] ?? 0, isLiked: mine.has(r.id), replies: [] })
+  )
+  const byId = new Map(base.map((c) => [c.id, { ...c, replies: [] as CommentDTO[] }]))
+  const topLevel: CommentDTO[] = []
+  for (const c of base) {
+    const node = byId.get(c.id)!
+    if (c.parentId) {
+      // Walk up to the TOP-LEVEL ancestor so nesting stays one level deep.
+      let root: { id: string; parentId: string | null } = c
+      const seen = new Set<string>([c.id])
+      while (root.parentId && byId.has(root.parentId) && !seen.has(root.parentId)) {
+        seen.add(root.parentId)
+        root = byId.get(root.parentId)! as { id: string; parentId: string | null }
+      }
+      const parent = byId.get(root.id)
+      if (parent && parent.id !== c.id) {
+        parent.replies.push(stripReplies(node))
+        continue
+      }
+    }
+    topLevel.push(node)
+  }
+  return topLevel
+}
+
+function stripReplies(c: CommentDTO): CommentDTO {
+  const out: CommentDTO = { ...c }
+  delete out.replies
+  return out
+}
+
+/** Build a single CommentDTO with its likes state (used right after create). */
+export async function decorateOneComment(row: CommentRow, viewerId: string): Promise<CommentDTO> {
+  const [dto] = await decorateComments([row], viewerId)
+  return dto
 }

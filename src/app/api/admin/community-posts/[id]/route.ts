@@ -18,7 +18,7 @@ type CommunityPostRow = {
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { id } = await ctx.params
     const { data: post, error } = await supabase

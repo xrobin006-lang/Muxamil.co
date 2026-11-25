@@ -1,14 +1,20 @@
 import { NextRequest } from 'next/server'
 import { ok, fail, guard, errors } from '@/lib/api-helpers'
-import { registerSchema } from '@/lib/validators'
+import { registerSchema, usernameProblem } from '@/lib/validators'
 import { setSessionCookie, createAuthUser } from '@/lib/auth'
 import { ensureSharedProfilesRow } from '@/lib/provision'
 import { supabase, fetchSiteSettings, usernameTaken, nowIso, toAppUser } from '@/lib/supabase'
 import { notifyUser } from '@/lib/realtime'
+import { rateLimit, clientKeyFrom } from '@/lib/rate-limit'
 import type { SessionUser } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
   return guard(async () => {
+    // Abuse guard: 5 registrations / hour per client.
+    if (!rateLimit('auth-register', clientKeyFrom(req), 5, 60 * 60_000)) {
+      return fail('Too many registration attempts. Please try again later.', 429)
+    }
+
     const body = await req.json().catch(() => null)
     const parsed = registerSchema.safeParse(body)
     if (!parsed.success) {
@@ -23,6 +29,9 @@ export async function POST(req: NextRequest) {
 
     const normalizedEmail = email.toLowerCase()
     const normalizedUsername = username.toLowerCase()
+
+    const reservedProblem = usernameProblem(normalizedUsername)
+    if (reservedProblem) return fail(reservedProblem, 400)
 
     if (await usernameTaken(normalizedUsername)) {
       return fail('That username is already taken.', 400)
@@ -81,9 +90,7 @@ export async function POST(req: NextRequest) {
       message: `Welcome to ${settings.site_name}, ${fullName}! Explore official posts, join the conversation, and say hello to the team.`,
     })
 
-    // Same dual transport as login: cookie + echoed token (Bearer fallback
-    // for iframe preview contexts). Identical server-side verification.
-    const sessionToken = await setSessionCookie(created.id)
-    return ok({ user: toAppUser(profile) satisfies SessionUser, sessionToken })
+    await setSessionCookie(created.id)
+    return ok({ user: toAppUser(profile) satisfies SessionUser })
   })
 }

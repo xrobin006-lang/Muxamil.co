@@ -7,7 +7,6 @@ type NotificationRow = {
   id: string
   type: string
   entity_id: string | null
-  entity_slug: string | null
   message: string
   is_read: boolean
   created_at: string
@@ -25,7 +24,7 @@ export async function GET(req: NextRequest) {
 
     let query = supabase
       .from('mux_notifications')
-      .select('id, type, entity_id, entity_slug, message, is_read, created_at')
+      .select('id, type, entity_id, message, is_read, created_at')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(limit + 1)
@@ -52,7 +51,6 @@ export async function GET(req: NextRequest) {
         type: n.type,
         message: n.message,
         relatedId: n.entity_id ?? null,
-        entitySlug: n.entity_slug ?? null,
         isRead: !!n.is_read,
         createdAt: n.created_at,
       })),

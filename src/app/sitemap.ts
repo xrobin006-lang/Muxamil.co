@@ -1,0 +1,18 @@
+import type { MetadataRoute } from 'next'
+
+export default function sitemap(): MetadataRoute.Sitemap {
+  return [
+    {
+      url: 'https://muxamil.co/',
+      lastModified: new Date(),
+      changeFrequency: 'daily',
+      priority: 1,
+    },
+    {
+      url: 'https://muxamil.co/work-guideline',
+      lastModified: new Date(),
+      changeFrequency: 'daily',
+      priority: 0.9,
+    },
+  ]
+}

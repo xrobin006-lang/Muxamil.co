@@ -61,7 +61,7 @@ async function headCount(table: string, build: (q: any) => any): Promise<number>
 export async function GET(req: NextRequest) {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const now = new Date()
     const to = parseDateParam(req.nextUrl.searchParams.get('to'), now)
@@ -127,7 +127,12 @@ export async function GET(req: NextRequest) {
       displayedLikes += p.likes_count ?? 0
     }
 
-    // ---- AI responses (comments authored by the AI system account) -----
+    // ---- replies: member vs AI (split by author username) ---------------
+    const { data: replyRows, error: replyErr } = await supabase
+      .from('mux_comments')
+      .select('user_id')
+      .limit(10_000)
+    if (replyErr) throw new Error(replyErr.message)
     const { data: aiProfile, error: aiErr } = await supabase
       .from('mux_profiles')
       .select('id')
@@ -135,14 +140,11 @@ export async function GET(req: NextRequest) {
       .maybeSingle()
     if (aiErr) throw new Error(aiErr.message)
     const aiId = (aiProfile as { id: string } | null)?.id ?? null
+    let memberReplies = 0
     let aiReplies = 0
-    if (aiId) {
-      const { count, error: aiCountErr } = await supabase
-        .from('mux_comments')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', aiId)
-      if (aiCountErr) throw new Error(aiCountErr.message)
-      aiReplies = count ?? 0
+    for (const r of (replyRows ?? []) as { user_id: string | null }[]) {
+      if (aiId && r.user_id === aiId) aiReplies += 1
+      else memberReplies += 1
     }
 
     // ---- series (raw rows capped, grouped by UTC day in JS) -------------
@@ -193,6 +195,18 @@ export async function GET(req: NextRequest) {
       category_id: string | null
     }[]
 
+    // comments per top post + category grouping (JS, from real rows)
+    const { data: allComments, error: commentsErr } = await supabase
+      .from('mux_comments')
+      .select('post_id')
+      .eq('is_hidden', false)
+      .limit(10_000)
+    if (commentsErr) throw new Error(commentsErr.message)
+    const commentsByPost = new Map<string, number>()
+    for (const c of (allComments ?? []) as { post_id: string }[]) {
+      commentsByPost.set(c.post_id, (commentsByPost.get(c.post_id) ?? 0) + 1)
+    }
+
     const { data: catRows, error: catErr } = await supabase
       .from('mux_categories')
       .select('id,name')
@@ -219,6 +233,7 @@ export async function GET(req: NextRequest) {
       viewsReal: p.views_real ?? 0,
       viewsDisplayed: p.views_count ?? 0,
       likesReal: p.likes_real ?? 0,
+      comments: commentsByPost.get(p.id) ?? 0,
     }))
 
     const topCategories: AnalyticsDTO['topCategories'] = [...postsByCategory.entries()]
@@ -230,31 +245,6 @@ export async function GET(req: NextRequest) {
       }))
       .sort((a, b) => b.viewsReal - a.viewsReal || b.postsCount - a.postsCount)
       .slice(0, 8)
-
-    // ---- recent AI automation jobs (admin visibility, read-only) --------
-    const { data: jobRows, error: jobErr } = await supabase
-      .from('mux_ai_jobs')
-      .select('id,job_type,trigger_source,provider,post_id,created_at,post:mux_posts(title)')
-      .order('created_at', { ascending: false })
-      .limit(12)
-    if (jobErr) throw new Error(jobErr.message)
-    const aiJobs: AnalyticsDTO['aiJobs'] = ((jobRows ?? []) as unknown as {
-      id: string
-      job_type: string | null
-      trigger_source: string | null
-      provider: string | null
-      post_id: string | null
-      created_at: string
-      post: { title: string | null } | { title: string | null }[] | null
-    }[]).map((j) => ({
-      id: j.id,
-      jobType: j.job_type ?? 'unknown',
-      provider: j.provider ?? null,
-      triggerSource: j.trigger_source ?? null,
-      postId: j.post_id ?? null,
-      postTitle: (Array.isArray(j.post) ? j.post[0]?.title : j.post?.title) ?? null,
-      createdAt: j.created_at,
-    }))
 
     const analytics: AnalyticsDTO = {
       range: { from: fromIso, to: toIso },
@@ -272,6 +262,7 @@ export async function GET(req: NextRequest) {
         displayedViews,
         realLikes,
         displayedLikes,
+        memberReplies,
         aiReplies,
         savedCount,
         followCount,
@@ -281,7 +272,6 @@ export async function GET(req: NextRequest) {
       signupsSeries,
       topPosts,
       topCategories,
-      aiJobs,
     }
     return ok(analytics)
   })

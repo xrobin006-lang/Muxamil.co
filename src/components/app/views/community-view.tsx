@@ -9,7 +9,7 @@ import { ApiError, apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
 import { useSocketEvent } from '@/hooks/use-realtime'
-import { formatCount, formatFullDate } from '@/lib/format'
+import { formatFullDate } from '@/lib/format'
 import type { CommunityDTO, CommunityPostDTO } from '@/lib/types'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
@@ -40,7 +40,11 @@ export default function CommunityView({ communityId }: { communityId: string }) 
   const [notFound, setNotFound] = useState(false)
   const [failed, setFailed] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  /** Guards load() against out-of-order responses when communityId changes
+   *  in quick succession (same pattern as feed-view's loadSeqRef). */
+  const loadSeqRef = useRef(0)
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current
     setLoading(true)
     setNotFound(false)
     setFailed(false)
@@ -48,10 +52,12 @@ export default function CommunityView({ communityId }: { communityId: string }) 
       const data = await apiGet<PublicCommunityResponse>(
         `/api/communities/${encodeURIComponent(communityId)}?limit=${PAGE_LIMIT}`,
       )
+      if (seq !== loadSeqRef.current) return
       setCommunity(data.community)
       setPosts(data.posts)
       setNextCursor(data.nextCursor)
     } catch (err) {
+      if (seq !== loadSeqRef.current) return
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true)
       } else {
@@ -59,7 +65,7 @@ export default function CommunityView({ communityId }: { communityId: string }) 
         toast.error(err instanceof Error ? err.message : 'Could not load this community.')
       }
     } finally {
-      setLoading(false)
+      if (seq === loadSeqRef.current) setLoading(false)
     }
   }, [communityId])
 
@@ -232,7 +238,7 @@ export default function CommunityView({ communityId }: { communityId: string }) 
           </div>
         ) : (
           <div
-            className="relative h-32 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-44"
+            className="relative h-32 bg-gradient-to-br from-primary/85 via-primary/60 to-primary/85 sm:h-44"
             aria-hidden="true"
           >
             <div className="pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full bg-white/10 blur-2xl" aria-hidden="true" />
@@ -279,7 +285,7 @@ export default function CommunityView({ communityId }: { communityId: string }) 
               </p>
               <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Users className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                {formatCount(community.membersCount)} member{community.membersCount === 1 ? '' : 's'}
+                {community.membersCount.toLocaleString()} member{community.membersCount === 1 ? '' : 's'}
               </p>
               {ownerOnline && (
                 <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">

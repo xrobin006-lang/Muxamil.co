@@ -39,36 +39,19 @@ export function formatFullDate(iso: string): string {
   })
 }
 
-/**
- * THE centralized compact number formatter — the single presentation format
- * for every user-visible counter in the app (likes, views, followers,
- * following, members, CTA, analytics, notifications…).
- *
- * 999 → "999" · 1000 → "1K" · 1200 → "1.2K" · 1500 → "1.5K" · 9999 → "10K"
- * 10000 → "10K" · 125000 → "125K" · 1M · 1.2M · 10M · 100M · 1B · 1.2B ·
- * 10B · 100B · 1T.
- *
- * Presentation only — the underlying database number is never rounded or
- * mutated; exact values stay available via tooltips / toLocaleString().
- */
+/** Compact engagement numbers: 950 → "950", 1200 → "1.2K", 3400000 → "3.4M". */
 export function formatCount(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (!Number.isFinite(n) || n < 0) return '0'
   if (n < 1000) return String(Math.round(n))
-  const tiers: [number, string][] = [
-    [1e12, 'T'],
-    [1e9, 'B'],
-    [1e6, 'M'],
-    [1e3, 'K'],
-  ]
-  for (const [scale, suffix] of tiers) {
-    if (n >= scale) {
-      const value = n / scale
-      // 1–2 significant decimals: 1.2K, 1.5K, 10K, 125K — never "1.0K".
-      const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
-      return `${rounded}${suffix}`
-    }
+  const compact = (value: number, suffix: string): string => {
+    const rounded = value >= 100 ? Math.round(value) : Number(value.toFixed(1))
+    // 999.5K rounds up to 1M (never "1000K") — same for M → B.
+    if (rounded >= 1000) return suffix === 'K' ? '1M' : '1B'
+    return `${rounded}${suffix}`
   }
-  return String(Math.round(n))
+  if (n < 1_000_000) return compact(n / 1000, 'K')
+  if (n < 1_000_000_000) return compact(n / 1_000_000, 'M')
+  return compact(n / 1_000_000_000, 'B')
 }
 
 export function formatBytes(bytes: number): string {

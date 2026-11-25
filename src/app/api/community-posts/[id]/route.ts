@@ -1,16 +1,11 @@
 import { NextRequest } from 'next/server'
-import { supabase, storageDelete } from '@/lib/supabase'
+import { supabase, BUCKETS, storageDelete, storageTargetFromUrl } from '@/lib/supabase'
 import { ok, guard, errors } from '@/lib/api-helpers'
 import { getActiveUser } from '@/lib/auth'
 import { emitRealtime } from '@/lib/realtime'
 
-/** Extract {bucket, path} from a Supabase storage object URL. */
-function storageTargetFromUrl(url: string | null | undefined): { bucket: string; path: string } | null {
-  if (!url) return null
-  const m = url.match(/\/object\/(?:public|sign|authenticated)\/([^/]+)\/(.+?)(?:\?|$)/)
-  if (!m) return null
-  return { bucket: m[1], path: decodeURIComponent(m[2]) }
-}
+/** Only these public post-media buckets may ever be cleaned up here. */
+const POST_MEDIA_BUCKETS = [BUCKETS.postImage, BUCKETS.postVideo, BUCKETS.postDocument] as const
 
 /**
  * Owner deletes their own community post; an admin can moderate any.
@@ -53,9 +48,15 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
       .eq('id', id)
     if (deleteError) throw new Error(deleteError.message)
 
-    // Best-effort storage cleanup — orphaned objects are acceptable.
+    // Best-effort storage cleanup — orphaned objects are acceptable. Only
+    // objects on THIS platform's storage host, in the public post-media
+    // buckets, under the post author's own prefix are ever removed, so a
+    // crafted attachment URL can never delete someone else's file.
     for (const a of atts ?? []) {
-      const target = storageTargetFromUrl(a.file_url)
+      const target = storageTargetFromUrl(a.file_url, {
+        buckets: POST_MEDIA_BUCKETS,
+        pathPrefix: `posts/${post.author_id}/`,
+      })
       if (target) await storageDelete(target.bucket, target.path)
     }
 

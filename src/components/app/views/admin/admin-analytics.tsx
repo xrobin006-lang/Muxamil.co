@@ -10,7 +10,6 @@ import {
   FileText,
   Eye,
   Heart,
-  Bot,
   MessageSquare,
   Sparkles,
   Bookmark,
@@ -34,7 +33,6 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { apiGet } from '@/lib/api-client'
-import { formatCount, timeAgo } from '@/lib/format'
 import type { AnalyticsDTO } from '@/lib/types'
 
 type RangeKey = 'today' | '7d' | '30d' | '90d' | 'custom'
@@ -138,37 +136,37 @@ export default function AdminAnalytics() {
     if (!data) return []
     const t = data.totals
     return [
-      { label: 'Members', value: formatCount(t.totalMembers), sub: `${formatCount(t.verifiedMembers)} verified · ${formatCount(t.blockedMembers)} blocked`, icon: Users },
-      { label: 'Verified members', value: formatCount(t.verifiedMembers), icon: BadgeCheck },
-      { label: 'New members', value: formatCount(t.newMembers), sub: 'in range', icon: UserPlus },
-      { label: 'Active members', value: formatCount(t.activeMembers), sub: 'last 30 days', icon: Activity },
+      { label: 'Members', value: t.totalMembers.toLocaleString(), sub: `${t.verifiedMembers.toLocaleString()} verified · ${t.blockedMembers.toLocaleString()} blocked`, icon: Users },
+      { label: 'Verified members', value: t.verifiedMembers.toLocaleString(), icon: BadgeCheck },
+      { label: 'New members', value: t.newMembers.toLocaleString(), sub: 'in range', icon: UserPlus },
+      { label: 'Active members', value: t.activeMembers.toLocaleString(), sub: 'last 30 days', icon: Activity },
       {
         label: 'Official posts',
-        value: formatCount(t.totalPosts),
-        sub: `${formatCount(t.publishedPosts)} published · ${formatCount(t.draftPosts)} draft · ${formatCount(t.scheduledPosts)} scheduled`,
+        value: t.totalPosts.toLocaleString(),
+        sub: `${t.publishedPosts.toLocaleString()} published · ${t.draftPosts.toLocaleString()} draft · ${t.scheduledPosts.toLocaleString()} scheduled`,
         icon: FileText,
       },
       {
         label: 'Views',
-        value: formatCount(t.displayedViews),
-        sub: `${formatCount(t.realViews)} real`,
+        value: t.displayedViews.toLocaleString(),
+        sub: `${t.realViews.toLocaleString()} real`,
         icon: Eye,
       },
       {
         label: 'Likes',
-        value: formatCount(t.displayedLikes),
-        sub: `${formatCount(t.realLikes)} real`,
+        value: t.displayedLikes.toLocaleString(),
+        sub: `${t.realLikes.toLocaleString()} real`,
         icon: Heart,
       },
       {
-        label: 'AI responses',
-        value: formatCount(t.aiReplies),
-        sub: 'AI-generated replies all-time',
-        icon: Bot,
+        label: 'Replies',
+        value: (t.memberReplies + t.aiReplies).toLocaleString(),
+        sub: `${t.memberReplies.toLocaleString()} member · ${t.aiReplies.toLocaleString()} AI`,
+        icon: MessageSquare,
       },
-      { label: 'Saves', value: formatCount(t.savedCount), sub: 'bookmarks', icon: Bookmark },
-      { label: 'Follows', value: formatCount(t.followCount), icon: UserPlus2 },
-      { label: 'CTA clicks', value: formatCount(t.ctaClicks), sub: 'in range', icon: MousePointerClick },
+      { label: 'Saves', value: t.savedCount.toLocaleString(), sub: 'bookmarks', icon: Bookmark },
+      { label: 'Follows', value: t.followCount.toLocaleString(), icon: UserPlus2 },
+      { label: 'CTA clicks', value: t.ctaClicks.toLocaleString(), sub: 'in range', icon: MousePointerClick },
     ]
   }, [data])
 
@@ -295,7 +293,7 @@ export default function AdminAnalytics() {
                   <Eye className="h-4 w-4 text-primary" aria-hidden="true" /> Post views
                 </h3>
                 <span className="text-xs text-muted-foreground tabular-nums">
-                  {formatCount(viewsSum)} in range
+                  {viewsSum.toLocaleString()} in range
                 </span>
               </div>
               {loading ? (
@@ -449,6 +447,10 @@ export default function AdminAnalytics() {
                           <Heart className="h-3.5 w-3.5" aria-hidden="true" />
                           <span className="tabular-nums">{post.likesReal.toLocaleString()}</span>
                         </span>
+                        <span className="inline-flex items-center gap-1" dir="ltr">
+                          <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span className="tabular-nums">{post.comments.toLocaleString()}</span>
+                        </span>
                       </div>
                     </li>
                   ))}
@@ -489,52 +491,6 @@ export default function AdminAnalytics() {
                 </ul>
               )}
             </div>
-          </section>
-
-          {/* Recent AI automation activity */}
-          <section aria-label="AI activity" className="overflow-hidden rounded-2xl border bg-card shadow-sm">
-            <div className="flex items-center gap-2 border-b px-4 py-3 sm:px-5">
-              <Sparkles className="h-4 w-4 text-primary" aria-hidden="true" />
-              <h3 className="text-sm font-semibold tracking-tight">Recent AI activity</h3>
-              <span className="ml-auto text-xs text-muted-foreground">
-                {data.totals.aiReplies.toLocaleString()} AI repl{data.totals.aiReplies === 1 ? 'y' : 'ies'} all-time
-              </span>
-            </div>
-            {data.aiJobs.length === 0 ? (
-              <p className="px-5 py-8 text-center text-sm text-muted-foreground">
-                No AI engagement jobs yet. The AI assistant reacts to new published posts automatically.
-              </p>
-            ) : (
-              <ul className="divide-y" aria-label="AI jobs">
-                {data.aiJobs.map((job) => (
-                  <li key={job.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 sm:px-5">
-                    <span
-                      className={cn(
-                        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
-                        job.jobType === 'auto_reply'
-                          ? 'bg-primary/10 text-primary'
-                          : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                      )}
-                      dir="ltr"
-                    >
-                      {job.jobType === 'auto_reply' ? (
-                        <MessageSquare className="h-3 w-3" aria-hidden="true" />
-                      ) : (
-                        <Heart className="h-3 w-3" aria-hidden="true" />
-                      )}
-                      {job.jobType === 'auto_reply' ? 'Reply' : 'Reaction'}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-sm" dir="auto" title={job.postTitle ?? undefined}>
-                      {job.postTitle || 'Untitled post'}
-                    </span>
-                    <span className="shrink-0 text-xs text-muted-foreground" dir="ltr">
-                      {job.triggerSource === 'comment' ? 'comment trigger (legacy)' : 'on publish'}
-                      {job.provider ? ` · ${job.provider}` : ''} · {timeAgo(job.createdAt)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
           </section>
 
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">

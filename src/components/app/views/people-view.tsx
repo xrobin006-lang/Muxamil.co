@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { BadgeCheck, CalendarDays, Loader2, RefreshCw, Search, SearchX, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -9,7 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { apiGet } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
 import { usePresenceStore } from '@/stores/presence-store'
-import { formatFullDate, formatCount } from '@/lib/format'
+import { formatFullDate } from '@/lib/format'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
 import { EmptyState } from '../components/empty-state'
@@ -62,6 +62,8 @@ export default function PeopleView() {
   const [loading, setLoading] = useState(true)
   const [loadFailed, setLoadFailed] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  /** Guards loadPeople against out-of-order search responses. */
+  const searchSeqRef = useRef(0)
 
   // Debounce the search box (~350ms) so typing doesn't hammer the API.
   useEffect(() => {
@@ -70,21 +72,26 @@ export default function PeopleView() {
   }, [query])
 
   const loadPeople = useCallback(async (q: string) => {
+    // Sequence guard: a slow earlier search must never overwrite the results
+    // of a newer one (same pattern as feed-view's loadSeqRef).
+    const seq = ++searchSeqRef.current
     setLoading(true)
     setLoadFailed(false)
     try {
       const data = await apiGet<PeopleResponse>(
         `/api/users?q=${encodeURIComponent(q)}&page=1&limit=${PAGE_SIZE}`,
       )
+      if (seq !== searchSeqRef.current) return
       setPeople(data.users)
       setTotal(data.total)
       setPage(data.page)
       setPages(data.pages)
     } catch (err) {
+      if (seq !== searchSeqRef.current) return
       setLoadFailed(true)
       toast.error(err instanceof Error ? err.message : 'Could not load members.')
     } finally {
-      setLoading(false)
+      if (seq === searchSeqRef.current) setLoading(false)
     }
   }, [])
 
@@ -117,9 +124,9 @@ export default function PeopleView() {
       <div className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5">
         <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
           <BadgeCheck className="h-5 w-5 shrink-0 text-sky-500" aria-hidden="true" />
-          Verified Members
+          People
         </h2>
-        <p className="mt-0.5 text-sm text-muted-foreground">Blue-tick members of Muxamil.co</p>
+        <p className="mt-0.5 text-sm text-muted-foreground">Verified, blue-tick members of the platform.</p>
       </div>
 
       {/* Search bar */}
@@ -148,8 +155,8 @@ export default function PeopleView() {
         {!loading && !searching && !loadFailed && (
           <p className="mt-2.5 text-xs text-muted-foreground" aria-live="polite">
             {debouncedQuery
-              ? `${formatCount(total)} result${total === 1 ? '' : 's'} for “${debouncedQuery}”`
-              : `${formatCount(total)} verified member${total === 1 ? '' : 's'} on Muxamil.co`}
+              ? `${total} result${total === 1 ? '' : 's'} for “${debouncedQuery}”`
+              : `${total} verified member${total === 1 ? '' : 's'}`}
           </p>
         )}
       </div>
@@ -191,7 +198,7 @@ export default function PeopleView() {
           description={
             debouncedQuery
               ? `No verified members match “${debouncedQuery}”. Try a different name or username.`
-              : 'Verified members of Muxamil.co will appear here.'
+              : 'Verified members will appear here.'
           }
           action={
             debouncedQuery ? (

@@ -6,12 +6,12 @@ import {
   BadgeCheck,
   CalendarDays,
   Camera,
-  ImageIcon,
+  Crop,
+  Image as ImageIcon,
   Loader2,
   Pencil,
   Plus,
   ShieldCheck,
-  Trash2,
   User as UserIcon,
   UserCheck,
   UsersRound,
@@ -25,10 +25,12 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { apiGet, apiJson, apiUpload } from '@/lib/api-client'
 import { useAppStore } from '@/stores/app-store'
-import { formatFullDate } from '@/lib/format'
+import { formatCount, formatFullDate } from '@/lib/format'
 import type { CommunityDTO, CommunityPostDTO, SessionUser } from '@/lib/types'
 import { UserAvatar } from '../components/user-avatar'
 import { VerifiedBadge } from '../components/verified-badge'
+import { ProfileBanner } from '../components/profile-banner'
+import { ImageEditorDialog, type ImageFit } from '../components/image-editor'
 
 /** Contract of GET /api/community — `posts` is a SIBLING of `community`,
  *  containing all of the owner's community posts (any status). */
@@ -52,7 +54,6 @@ const AVATAR_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 const BANNER_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 const USERNAME_RE = /^[a-zA-Z0-9_.]+$/
 const BIO_MAX = 280
-
 function Chip({
   icon: Icon,
   children,
@@ -96,6 +97,16 @@ export default function ProfileView() {
   const [saving, setSaving] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const bannerInputRef = useRef<HTMLInputElement>(null)
+
+  // Crop metadata + stored originals (lossless re-adjustment, §33).
+  const [avatarFit, setAvatarFit] = useState<ImageFit | null>(null)
+  const [avatarOriginalUrl, setAvatarOriginalUrl] = useState<string | null>(null)
+  const [bannerFit, setBannerFit] = useState<ImageFit | null>(null)
+  const [bannerOriginalUrl, setBannerOriginalUrl] = useState<string | null>(null)
+
+  // Image editor state (null = closed).
+  const [avatarEditor, setAvatarEditor] = useState<{ file: File | null; open: boolean } | null>(null)
+  const [bannerEditor, setBannerEditor] = useState<{ file: File | null; open: boolean } | null>(null)
 
   // ---- Community teaser (verified creators) ----------------------------
   const [communityData, setCommunityData] = useState<MyCommunityResponse | null>(null)
@@ -158,43 +169,102 @@ export default function ProfileView() {
     setBannerUrl(user.bannerUrl)
     setBannerUploading(false)
     setBannerProgress(0)
+    setAvatarFit(user.avatarFit ?? null)
+    setAvatarOriginalUrl(user.avatarOriginalUrl ?? null)
+    setBannerFit(user.bannerFit ?? null)
+    setBannerOriginalUrl(user.bannerOriginalUrl ?? null)
     setEditing(true)
   }
 
-  const handleAvatarFile = async (file: File) => {
+  /** Pick → editor (auto-fit applied on open for fresh uploads). */
+  const handleAvatarFile = (file: File) => {
     if (avatarUploading) return
     if (!file.type.startsWith('image/')) {
       toast.error('Please choose an image file.')
       return
     }
+    setAvatarEditor({ file, open: true })
+  }
+
+  const handleBannerFile = (file: File) => {
+    if (bannerUploading) return
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please choose an image file.')
+      return
+    }
+    setBannerEditor({ file, open: true })
+  }
+
+  /** Editor save: upload the original (preserved for later re-crops) and
+   *  the processed display image, then stage URLs + fit in the form. */
+  const saveAvatarEdit = async (result: {
+    displayFile: File
+    originalFile: File | null
+    fit: ImageFit
+  }) => {
     setAvatarUploading(true)
     setAvatarProgress(0)
     try {
-      const res = await apiUpload('/api/upload', file, 'avatar', setAvatarProgress)
-      setAvatarUrl(res.url)
+      let original = avatarOriginalUrl
+      if (result.originalFile) {
+        const up = await apiUpload('/api/upload', result.originalFile, 'avatar', (p) =>
+          setAvatarProgress(Math.round(p * 0.4)),
+        )
+        original = up.url
+      }
+      const display = await apiUpload('/api/upload', result.displayFile, 'avatar', (p) =>
+        setAvatarProgress(40 + Math.round(p * 0.6)),
+      )
+      setAvatarUrl(display.url)
+      setAvatarFit(result.fit)
+      setAvatarOriginalUrl(original)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Avatar upload failed.')
+      toast.error(err instanceof Error ? err.message : 'Photo upload failed.')
     } finally {
       setAvatarUploading(false)
+      setAvatarProgress(0)
     }
   }
 
-  const handleBannerFile = async (file: File) => {
-    if (bannerUploading) return
-    if (!file.type.startsWith('image/')) {
-      toast.error('Please choose an image file for your banner.')
-      return
-    }
+  const saveBannerEdit = async (result: {
+    displayFile: File
+    originalFile: File | null
+    fit: ImageFit
+  }) => {
     setBannerUploading(true)
     setBannerProgress(0)
     try {
-      const res = await apiUpload('/api/upload', file, 'banner', setBannerProgress)
-      setBannerUrl(res.url)
+      let original = bannerOriginalUrl
+      if (result.originalFile) {
+        const up = await apiUpload('/api/upload', result.originalFile, 'banner', (p) =>
+          setBannerProgress(Math.round(p * 0.4)),
+        )
+        original = up.url
+      }
+      const display = await apiUpload('/api/upload', result.displayFile, 'banner', (p) =>
+        setBannerProgress(40 + Math.round(p * 0.6)),
+      )
+      setBannerUrl(display.url)
+      setBannerFit(result.fit)
+      setBannerOriginalUrl(original)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Banner upload failed.')
     } finally {
       setBannerUploading(false)
+      setBannerProgress(0)
     }
+  }
+
+  const removeAvatar = () => {
+    setAvatarUrl(null)
+    setAvatarFit(null)
+    setAvatarOriginalUrl(null)
+  }
+
+  const removeBanner = () => {
+    setBannerUrl(null)
+    setBannerFit(null)
+    setBannerOriginalUrl(null)
   }
 
   const validate = (): string | null => {
@@ -223,6 +293,10 @@ export default function ProfileView() {
         bio: bio.trim(),
         avatarUrl,
         bannerUrl,
+        avatarFit,
+        avatarOriginalUrl,
+        bannerFit,
+        bannerOriginalUrl,
       })
       setUser(data.user)
       toast.success('Profile updated.')
@@ -238,41 +312,39 @@ export default function ProfileView() {
   // ---- Editing mode ----------------------------------------------------
   if (editing) {
     return (
+      <>
       <section className="rounded-2xl border bg-card p-4 shadow-sm sm:p-6" aria-label="Edit profile">
         <h2 className="text-lg font-semibold tracking-tight">Edit profile</h2>
-        <p className="mt-0.5 text-sm text-muted-foreground">Update how you appear across Muxamil.co.</p>
+        <p className="mt-0.5 text-sm text-muted-foreground">Update how you appear across the platform.</p>
 
         <div className="mt-6 space-y-5">
-          {/* Banner */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Profile banner</Label>
-              <span className="text-xs text-muted-foreground">Optional · shown at the top of your profile</span>
-            </div>
-            <div className="group relative overflow-hidden rounded-xl border bg-muted/40">
+          {/* Banner / cover image */}
+          <div className="space-y-2.5">
+            <div className="overflow-hidden rounded-xl border">
               {bannerUrl ? (
-                <img
-                  src={bannerUrl}
-                  alt="Profile banner preview"
-                  className="h-32 w-full object-cover sm:h-40"
-                />
-              ) : (
-                <div className="flex h-32 w-full flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-emerald-500/25 via-teal-600/25 to-green-700/25 text-muted-foreground sm:h-40">
-                  <ImageIcon className="h-7 w-7" aria-hidden="true" />
-                  <p className="text-xs font-medium">No banner yet</p>
+                <div className="h-24 w-full overflow-hidden sm:h-28">
+                  <img
+                    src={bannerUrl}
+                    alt="Banner preview"
+                    className="h-full w-full object-cover"
+                    style={{
+                      objectPosition: `${(bannerFit?.x ?? 0.5) * 100}% ${(bannerFit?.y ?? 0.5) * 100}%`,
+                      transform: bannerFit && bannerFit.scale > 1 ? `scale(${bannerFit.scale})` : undefined,
+                      transformOrigin: `${(bannerFit?.x ?? 0.5) * 100}% ${(bannerFit?.y ?? 0.5) * 100}%`,
+                    }}
+                  />
                 </div>
+              ) : (
+                <div
+                  className="h-24 w-full bg-gradient-to-br from-primary/85 via-primary/60 to-primary/85 sm:h-28"
+                  aria-hidden="true"
+                />
               )}
               {bannerUploading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[2px]">
-                  <div className="w-48 space-y-2 text-center">
-                    <Loader2 className="mx-auto h-5 w-5 animate-spin" aria-hidden="true" />
-                    <Progress value={bannerProgress} className="h-1.5" aria-label="Uploading banner" />
-                    <p className="text-xs text-muted-foreground">Uploading banner…</p>
-                  </div>
-                </div>
+                <Progress value={bannerProgress} className="h-1.5 rounded-none" aria-label="Uploading banner" />
               )}
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -287,22 +359,29 @@ export default function ProfileView() {
                 )}
                 {bannerUrl ? 'Change banner' : 'Upload banner'}
               </Button>
-              {bannerUrl && !bannerUploading && (
+              {bannerUrl && bannerOriginalUrl && !bannerUploading && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  onClick={() => setBannerUrl(null)}
-                  className="text-destructive hover:text-destructive"
+                  onClick={() => setBannerEditor({ file: null, open: true })}
                 >
-                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  <Crop className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  Adjust crop
+                </Button>
+              )}
+              {bannerUrl && !bannerUploading && (
+                <Button type="button" variant="ghost" size="sm" onClick={removeBanner}>
                   Remove
                 </Button>
               )}
             </div>
-            <p className="text-xs text-muted-foreground">
-              JPG, PNG, WebP or GIF · up to 8 MB · wide images work best (1500×500)
-            </p>
+            {!bannerUploading && (
+              <p className="text-xs text-muted-foreground">
+                Appears at the top of your profile · JPG, PNG, WebP or GIF · up to 5 MB · wide images work best · drag
+                to position after upload
+              </p>
+            )}
           </div>
           <input
             ref={bannerInputRef}
@@ -313,7 +392,7 @@ export default function ProfileView() {
             tabIndex={-1}
             onChange={(e) => {
               const file = e.target.files?.[0]
-              if (file) void handleBannerFile(file)
+              if (file) handleBannerFile(file)
               e.target.value = ''
             }}
           />
@@ -337,8 +416,19 @@ export default function ProfileView() {
                   )}
                   {avatarUrl ? 'Change photo' : 'Upload photo'}
                 </Button>
+                {avatarUrl && avatarOriginalUrl && !avatarUploading && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setAvatarEditor({ file: null, open: true })}
+                  >
+                    <Crop className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                    Adjust crop
+                  </Button>
+                )}
                 {avatarUrl && !avatarUploading && (
-                  <Button type="button" variant="ghost" size="sm" onClick={() => setAvatarUrl(null)}>
+                  <Button type="button" variant="ghost" size="sm" onClick={removeAvatar}>
                     Remove
                   </Button>
                 )}
@@ -346,7 +436,7 @@ export default function ProfileView() {
               {avatarUploading ? (
                 <Progress value={avatarProgress} className="h-1.5 w-40" aria-label="Uploading avatar" />
               ) : (
-                <p className="text-xs text-muted-foreground">JPG, PNG, WebP or GIF · up to 5 MB</p>
+                <p className="text-xs text-muted-foreground">JPG, PNG, WebP or GIF · up to 5 MB · crop after upload</p>
               )}
             </div>
           </div>
@@ -359,7 +449,7 @@ export default function ProfileView() {
             tabIndex={-1}
             onChange={(e) => {
               const file = e.target.files?.[0]
-              if (file) void handleAvatarFile(file)
+              if (file) handleAvatarFile(file)
               e.target.value = ''
             }}
           />
@@ -420,15 +510,36 @@ export default function ProfileView() {
             <Button type="button" variant="ghost" onClick={() => setEditing(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button type="button" onClick={saveProfile} disabled={saving || avatarUploading}>
+            <Button type="button" onClick={saveProfile} disabled={saving || avatarUploading || bannerUploading}>
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />}
               {saving ? 'Saving…' : 'Save changes'}
             </Button>
           </div>
         </div>
       </section>
-    )
-  }
+
+      {/* Image editors */}
+      <ImageEditorDialog
+        open={!!avatarEditor?.open}
+        onOpenChange={(next) => setAvatarEditor(next ? { file: avatarEditor?.file ?? null, open: true } : null)}
+        mode="avatar"
+        sourceFile={avatarEditor?.file ?? null}
+        sourceUrl={avatarEditor && !avatarEditor.file ? avatarOriginalUrl : null}
+        initialFit={avatarFit}
+        onSave={saveAvatarEdit}
+      />
+      <ImageEditorDialog
+        open={!!bannerEditor?.open}
+        onOpenChange={(next) => setBannerEditor(next ? { file: bannerEditor?.file ?? null, open: true } : null)}
+        mode="banner"
+        sourceFile={bannerEditor?.file ?? null}
+        sourceUrl={bannerEditor && !bannerEditor.file ? bannerOriginalUrl : null}
+        initialFit={bannerFit}
+        onSave={saveBannerEdit}
+      />
+      </>
+  )
+}
 
   // ---- Profile display --------------------------------------------------
   const community = communityData?.community ?? null
@@ -440,18 +551,7 @@ export default function ProfileView() {
     <div className="space-y-4">
       {/* Header */}
       <section className="overflow-hidden rounded-2xl border bg-card shadow-sm">
-        {user.bannerUrl ? (
-          <img
-            src={user.bannerUrl}
-            alt={`${user.fullName}'s profile banner`}
-            className="h-28 w-full object-cover sm:h-36"
-          />
-        ) : (
-          <div
-            className="h-28 bg-gradient-to-br from-emerald-500/85 via-teal-600/85 to-green-700/85 sm:h-36"
-            aria-hidden="true"
-          />
-        )}
+        <ProfileBanner url={user.bannerUrl} name={user.fullName} fit={user.bannerFit} />
         <div className="px-4 pb-5 sm:px-6">
           <div className="-mt-12 flex flex-wrap items-end justify-between gap-3 sm:-mt-14">
             <div className="relative">
@@ -499,12 +599,27 @@ export default function ProfileView() {
                 <Chip icon={XCircle}>Not verified</Chip>
               )}
               <Chip icon={CalendarDays}>Member since {formatFullDate(user.createdAt)}</Chip>
+              {/* Real counts for members; the admin sees their own display
+                  count (public number only — no follower list exists). */}
               {followStats && (
                 <Chip icon={UsersRound}>
-                  {followStats.followersCount} Follower{followStats.followersCount === 1 ? '' : 's'}
+                  {formatCount(followStats.followersCount)} Follower
+                  {followStats.followersCount === 1 ? '' : 's'}
                 </Chip>
               )}
-              {followStats && <Chip icon={UserCheck}>{followStats.followingCount} Following</Chip>}
+              {followStats && user.role === 'admin' ? (
+                <button
+                  type="button"
+                  onClick={() => navigate({ name: 'following', userId: user.id })}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`View following list (${formatCount(followStats.followingCount)} following)`}
+                >
+                  <UserCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  {formatCount(followStats.followingCount)} Following
+                </button>
+              ) : (
+                followStats && <Chip icon={UserCheck}>{formatCount(followStats.followingCount)} Following</Chip>
+              )}
               <Chip icon={user.role === 'admin' ? ShieldCheck : UserIcon}>
                 {user.role === 'admin' ? 'Administrator' : 'Member'}
               </Chip>

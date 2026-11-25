@@ -43,7 +43,7 @@ function previewFor(m: MessageLite): string {
 export async function GET() {
   return guard(async () => {
     const admin = await requireAdmin()
-    if (!admin) return errors.forbidden()
+    if (!admin) return errors.notFound()
 
     const { data: conversations, error } = await supabase
       .from('mux_conversations')
@@ -55,18 +55,19 @@ export async function GET() {
     if (error) throw new Error(error.message)
 
     const rows = (conversations as unknown as ConversationRow[]) ?? []
-    const conversationIds = rows.map((c) => c.id)
 
     // Last message per conversation (newest first → first hit wins).
     const lastByConversation = new Map<string, MessageLite>()
     // Unread counts per conversation (messages from users awaiting an admin reply).
     const unreadByConversation = new Map<string, number>()
 
-    if (conversationIds.length > 0) {
+    // mux_messages.conversation_id is a NOT NULL FK to mux_conversations and
+    // this inbox loads EVERY conversation, so an .in(conversationIds) filter
+    // would be a no-op that only bloats the request URL as the site grows.
+    if (rows.length > 0) {
       const { data: recent, error: recentErr } = await supabase
         .from('mux_messages')
         .select('id,conversation_id,message,sender_id,attachment_type,created_at')
-        .in('conversation_id', conversationIds)
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
         .limit(1000)
@@ -80,7 +81,6 @@ export async function GET() {
       const { data: unread, error: unreadErr } = await supabase
         .from('mux_messages')
         .select('id,conversation_id')
-        .in('conversation_id', conversationIds)
         .eq('is_read', false)
         .neq('sender_id', admin.id)
         .limit(1000)
