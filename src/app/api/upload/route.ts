@@ -66,6 +66,14 @@ const CATEGORY_LIMITS: Record<string, { types: Record<string, number>; maxBytes:
       'application/pdf': 20 * 1024 * 1024,
     },
   },
+  'payment-proof': {
+    maxBytes: 4 * 1024 * 1024,
+    types: {
+      'image/jpeg': 4 * 1024 * 1024,
+      'image/png': 4 * 1024 * 1024,
+      'image/webp': 4 * 1024 * 1024,
+    },
+  },
   'message-media': {
     maxBytes: 25 * 1024 * 1024,
     types: {
@@ -169,31 +177,43 @@ export async function POST(req: NextRequest) {
     const baseName = /\.[a-z0-9]{1,8}$/i.test(originalName) ? originalName : `${originalName || 'file'}.${ext}`
 
     let url: string
+    let uploadPath: string
     if (category === 'avatar') {
       // Public bucket, one folder per profile.
       const path = storagePathFor(`profiles/${user.id}`, baseName)
+      uploadPath = path
       await storageUpload(BUCKETS.avatar, path, buf, declaredMime)
       url = storagePublicUrl(BUCKETS.avatar, path)
     } else if (category === 'banner') {
       // Dedicated public bucket, one folder per profile.
       const path = storagePathFor(`profiles/${user.id}`, baseName)
+      uploadPath = path
       await storageUpload(BUCKETS.banner, path, buf, declaredMime)
       url = storagePublicUrl(BUCKETS.banner, path)
     } else if (category === 'post-media' || category === 'community-media') {
       // Public buckets picked by MIME family, one folder per author.
       const bucket = postBucketFor(declaredMime)
       const path = storagePathFor(`posts/${user.id}`, baseName)
+      uploadPath = path
       await storageUpload(bucket, path, buf, declaredMime)
       url = storagePublicUrl(bucket, path)
+    } else if (category === 'payment-proof') {
+      // Private payment screenshots.
+      const paymentProofPath = storagePathFor('payment-proofs/' + user.id, baseName)
+      await storageUpload(BUCKETS.message, paymentProofPath, buf, declaredMime)
+      url = await storageSignedUrl(BUCKETS.message, paymentProofPath)
+      uploadPath = paymentProofPath
     } else {
       // message-media — PRIVATE bucket, served through long-lived signed URLs.
       const path = storagePathFor(`messages/${user.id}`, baseName)
+      uploadPath = path
       await storageUpload(BUCKETS.message, path, buf, declaredMime)
       url = await storageSignedUrl(BUCKETS.message, path)
     }
 
     return ok({
       url,
+      path: uploadPath,
       fileName: file.name.slice(0, 180),
       mimeType: declaredMime,
       fileSize: file.size,

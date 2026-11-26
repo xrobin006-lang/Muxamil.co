@@ -51,7 +51,7 @@ type AccessResponse = {
 
 type UploadedProof = { url: string; path: string; fileName: string }
 
-const PROOF_MAX_BYTES = 10 * 1024 * 1024
+const PROOF_MAX_BYTES = 4 * 1024 * 1024
 const PROOF_ACCEPT = 'image/jpeg,image/png,image/webp'
 
 /** Purchase-state → chip styling (the "where am I" indicator). */
@@ -499,7 +499,7 @@ function PaymentFlow({
       return
     }
     if (file.size > PROOF_MAX_BYTES) {
-      toast.error('Screenshot must be 10MB or smaller.')
+      toast.error('Screenshot must be 4MB or smaller.')
       return
     }
     setUploading(true)
@@ -764,7 +764,7 @@ function PaymentFlow({
                     <>
                       <ImagePlus className="h-6 w-6 text-fuchsia-300" aria-hidden="true" />
                       <span className="text-sm font-medium text-slate-300">Upload Screenshot</span>
-                      <span className="text-xs text-slate-500">JPEG, PNG or WebP · up to 10MB</span>
+                      <span className="text-xs text-slate-500">JPEG, PNG or WebP · up to 4MB</span>
                     </>
                   )}
                 </button>
